@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import { eq, and } from 'drizzle-orm'
 import { getDb } from '../db/client'
-import { users } from '../db/schema'
+import { users, superAdmins, societies, societyRoles } from '../db/schema'
 import {
   generateOtp,
   createOtp,
@@ -89,9 +89,107 @@ auth.post('/sendOTP', async (c) => {
     if (ownerRow.length === 0) {
       return c.json({ error: 'Mobile not authorized for this portal.' }, 403)
     }
-  } else {
-    // super_admin and society scopes — implemented in next step
-    return c.json({ error: 'This scope is not yet implemented.' }, 501)
+  } else if (scope === 'super_admin') {
+    // scopeRef must be the super admin slug
+    if (!scopeRef) {
+      return c.json({ error: 'scopeRef (super admin slug) is required' }, 400)
+    }
+
+    // Look up super admin by slug
+    const [admin] = await db
+      .select()
+      .from(superAdmins)
+      .where(eq(superAdmins.slug, scopeRef))
+      .limit(1)
+
+    if (!admin) {
+      return c.json({ error: 'Super admin not found' }, 404)
+    }
+
+    if (admin.status !== 'active') {
+      return c.json({ error: 'This super admin account is not active' }, 403)
+    }
+
+    // Look up the user with this mobile and matching super_admin
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(
+        and(
+          eq(users.mobile, mobile),
+          eq(users.userType, 'super_admin'),
+          eq(users.superAdminId, admin.id)
+        )
+      )
+      .limit(1)
+
+    if (!user) {
+      // Generic message — don't leak existence of users
+      return c.json({ error: 'Mobile not authorized for this portal.' }, 403)
+    }
+  } else if (scope === 'society') {
+    // scopeRef format: "superAdminSlug/societySlug"
+    if (!scopeRef || !scopeRef.includes('/')) {
+      return c.json(
+        {
+          error:
+            'scopeRef must be in format "superAdminSlug/societySlug"',
+        },
+        400
+      )
+    }
+
+    const [saSlug, socSlug] = scopeRef.split('/')
+
+    // Look up super admin
+    const [admin] = await db
+      .select()
+      .from(superAdmins)
+      .where(eq(superAdmins.slug, saSlug))
+      .limit(1)
+    if (!admin || admin.status !== 'active') {
+      return c.json({ error: 'Portal not found' }, 404)
+    }
+
+    // Look up society
+    const [society] = await db
+      .select()
+      .from(societies)
+      .where(
+        and(
+          eq(societies.superAdminId, admin.id),
+          eq(societies.slug, socSlug)
+        )
+      )
+      .limit(1)
+    if (!society || society.status !== 'active') {
+      return c.json({ error: 'Society not found or inactive' }, 404)
+    }
+
+    // Look up user with this mobile
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.mobile, mobile))
+      .limit(1)
+    if (!user) {
+      return c.json({ error: 'Mobile not authorized for this portal.' }, 403)
+    }
+
+    // Verify user has any role in this society
+    const userRoles = await db
+      .select()
+      .from(societyRoles)
+      .where(
+        and(
+          eq(societyRoles.societyId, society.id),
+          eq(societyRoles.userId, user.id),
+          eq(societyRoles.isActive, true)
+        )
+      )
+    if (userRoles.length === 0) {
+      return c.json({ error: 'Mobile not authorized for this portal.' }, 403)
+    }
   }
 
   // Generate + store OTP
@@ -155,6 +253,28 @@ auth.post('/verifyOTP', async (c) => {
     return c.json({ error: 'User not found.' }, 404)
   }
 
+  // For society_user, fetch their roles to embed in JWT
+  let societyRoleEntries: Array<{
+    societyId: number
+    role: 'chairman' | 'secretary' | 'cashier' | 'committee' | 'member'
+  }> = []
+
+  if (user.userType === 'society_user') {
+    const roles = await db
+      .select({
+        societyId: societyRoles.societyId,
+        role: societyRoles.role,
+      })
+      .from(societyRoles)
+      .where(
+        and(eq(societyRoles.userId, user.id), eq(societyRoles.isActive, true))
+      )
+    societyRoleEntries = roles.map((r) => ({
+      societyId: r.societyId,
+      role: r.role as 'chairman' | 'secretary' | 'cashier' | 'committee' | 'member',
+    }))
+  }
+
   // Issue JWT
   const token = await signJwt(
     {
@@ -162,6 +282,7 @@ auth.post('/verifyOTP', async (c) => {
       mobile: user.mobile,
       userType: user.userType,
       superAdminId: user.superAdminId,
+      societyRoles: societyRoleEntries,
     },
     c.env.JWT_SECRET
   )
@@ -174,6 +295,7 @@ auth.post('/verifyOTP', async (c) => {
       mobile: user.mobile,
       name: user.name,
       userType: user.userType,
+      societyRoles: societyRoleEntries,
     },
   })
 })

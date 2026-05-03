@@ -3,6 +3,10 @@ import { cors } from 'hono/cors'
 import { getDb } from './db/client'
 import { superAdmins, users, societies } from './db/schema'
 import auth from './routes/auth'
+import owner from './routes/owner'
+import publicRoutes from './routes/public'
+import superAdmin from './routes/superAdmin'
+import society from './routes/society'
 
 type Bindings = {
   DATABASE_URL: string
@@ -56,5 +60,9 @@ app.get('/db-test', async (c) => {
 
 // Mount auth routes at /auth/*
 app.route('/auth', auth)
+app.route('/owner', owner)
+app.route('/public', publicRoutes)
+app.route('/super-admin', superAdmin)
+app.route('/society', society)
 
 export default app
