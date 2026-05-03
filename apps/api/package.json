@@ -9,12 +9,15 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "@trpc/server": "^11.17.0",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.12.16",
     "zod": "^4.4.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260503.1",
+    "drizzle-kit": "^0.31.10",
     "typescript": "^6.0.3",
     "wrangler": "^4.87.0"
   }

@@ -1,15 +1,19 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { getDb } from './db/client'
+import { superAdmins } from './db/schema'
 
-const app = new Hono()
+type Bindings = {
+  DATABASE_URL: string
+}
 
-// Allow our React frontend to call this API
+const app = new Hono<{ Bindings: Bindings }>()
+
 app.use('/*', cors({
   origin: ['http://localhost:5173'],
   credentials: true,
 }))
 
-// Health check route
 app.get('/', (c) => {
   return c.json({
     status: 'ok',
@@ -18,10 +22,23 @@ app.get('/', (c) => {
   })
 })
 
-// Test route
-app.get('/hello/:name', (c) => {
-  const name = c.req.param('name')
-  return c.json({ message: `Hello, ${name}!` })
+// Test DB connection
+app.get('/db-test', async (c) => {
+  try {
+    const db = getDb(c.env.DATABASE_URL)
+    const result = await db.select().from(superAdmins).limit(1)
+    return c.json({
+      status: 'ok',
+      message: 'Database connection works!',
+      superAdminCount: result.length,
+      data: result,
+    })
+  } catch (error) {
+    return c.json({
+      status: 'error',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    }, 500)
+  }
 })
 
 export default app
