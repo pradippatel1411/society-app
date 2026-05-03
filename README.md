@@ -12,3 +12,10 @@ Multi-tenant SaaS for housing society maintenance collection.
 
 ## Hierarchy
 Owner → Super Admins → Societies → Committee + Members
+
+CommandWhat it runs
+pnpm dev:web 
+React frontend http://localhost:5173
+
+pnpm dev:api
+API backend http://localhost:8787

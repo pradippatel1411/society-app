@@ -1,0 +1,8 @@
+name = "society-api"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Local dev port
+[dev]
+port = 8787
