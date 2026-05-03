@@ -7,6 +7,7 @@ import {
   integer,
   boolean,
   uniqueIndex,
+  index,
 } from 'drizzle-orm/pg-core'
 import { relations } from 'drizzle-orm'
 import {
@@ -275,6 +276,28 @@ export const payments = pgTable('payments', {
   receiptUrl: text('receipt_url'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })
+
+// ============================================================
+// Table 11: otps
+// Sent OTPs awaiting verification. Cleaned up periodically.
+// ============================================================
+export const otps = pgTable(
+  'otps',
+  {
+    id: serial('id').primaryKey(),
+    mobile: varchar('mobile', { length: 15 }).notNull(),
+    code: varchar('code', { length: 10 }).notNull(),
+    scope: varchar('scope', { length: 30 }).notNull(),
+    scopeRef: varchar('scope_ref', { length: 100 }),
+    attempts: integer('attempts').default(0).notNull(),
+    isUsed: boolean('is_used').default(false).notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('otps_mobile_scope_idx').on(table.mobile, table.scope),
+  ]
+)
 
 // ============================================================
 // Relations (helps Drizzle do JOINs cleanly)

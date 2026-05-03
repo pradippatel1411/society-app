@@ -15,6 +15,13 @@
       "when": 1777801818956,
       "tag": "0001_mighty_smasher",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1777805102127,
+      "tag": "0002_gorgeous_wendell_vaughn",
+      "breakpoints": true
     }
   ]
 }

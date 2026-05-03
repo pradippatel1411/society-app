@@ -2,9 +2,13 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { getDb } from './db/client'
 import { superAdmins, users, societies } from './db/schema'
+import auth from './routes/auth'
 
 type Bindings = {
   DATABASE_URL: string
+  OWNER_MOBILE: string
+  JWT_SECRET: string
+  DEV_FIXED_OTP: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -14,15 +18,14 @@ app.use('/*', cors({
   credentials: true,
 }))
 
-app.get('/', (c) => {
-  return c.json({
+app.get('/', (c) =>
+  c.json({
     status: 'ok',
     message: 'Society API is running',
     timestamp: new Date().toISOString(),
   })
-})
+)
 
-// Test DB connection
 app.get('/db-test', async (c) => {
   try {
     const db = getDb(c.env.DATABASE_URL)
@@ -50,5 +53,8 @@ app.get('/db-test', async (c) => {
     )
   }
 })
+
+// Mount auth routes at /auth/*
+app.route('/auth', auth)
 
 export default app
