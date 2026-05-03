@@ -288,16 +288,17 @@ auth.post('/verifyOTP', async (c) => {
   )
 
   return c.json({
-    success: true,
-    token,
-    user: {
-      id: user.id,
-      mobile: user.mobile,
-      name: user.name,
-      userType: user.userType,
-      societyRoles: societyRoleEntries,
-    },
-  })
+  success: true,
+  token,
+  user: {
+    id: user.id,
+    mobile: user.mobile,
+    name: user.name,
+    userType: user.userType,
+    superAdminId: user.superAdminId,
+    societyRoles: societyRoleEntries,
+  },
+})
 })
 
 export default auth

@@ -178,8 +178,7 @@ export const societyRoles = pgTable(
   (table) => [
     uniqueIndex('society_user_role_idx').on(
       table.societyId,
-      table.userId,
-      table.role
+      table.userId
     ),
   ]
 )

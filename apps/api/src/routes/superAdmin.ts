@@ -339,25 +339,28 @@ superAdmin.post('/societies/:id/chairman', async (c) => {
   }
 
   // Create chairman role (also create member role for completeness)
-  await db
-    .insert(societyRoles)
-    .values({
+  // Set/upgrade role to chairman
+  const existingRole = await db
+    .select()
+    .from(societyRoles)
+    .where(
+      and(eq(societyRoles.societyId, id), eq(societyRoles.userId, userId))
+    )
+    .limit(1)
+
+  if (existingRole.length === 0) {
+    await db.insert(societyRoles).values({
       societyId: id,
       userId,
       role: 'chairman',
       assignedBy: c.get('user').userId,
     })
-    .onConflictDoNothing()
-
-  await db
-    .insert(societyRoles)
-    .values({
-      societyId: id,
-      userId,
-      role: 'member',
-      assignedBy: c.get('user').userId,
-    })
-    .onConflictDoNothing()
+  } else {
+    await db
+      .update(societyRoles)
+      .set({ role: 'chairman', assignedBy: c.get('user').userId })
+      .where(eq(societyRoles.id, existingRole[0].id))
+  }
 
   return c.json({
     success: true,

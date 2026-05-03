@@ -8,7 +8,7 @@ import {
   societies,
 } from '../db/schema'
 import { parseExcel, type ExcelMemberRow } from './excel'
-import type { CommitteeRole } from '../db/types'
+import type { CommitteeRole, SocietyRole } from '../db/types'
 
 export type ImportResult = {
   success: boolean
@@ -73,12 +73,12 @@ export async function importMembersFromExcel(
         }
 
         await linkUserToFlat(ctx, flatId, userId, row, mIdx === 0)
-        await ensureMemberRole(ctx, userId)
 
-        // Committee role only for primary mobile
-        if (mIdx === 0 && row.committeeRole) {
-          await ensureCommitteeRole(ctx, userId, row.committeeRole)
-        }
+        // Determine the role: committee role for primary mobile if specified,
+        // otherwise just 'member'
+        const userRole: SocietyRole =
+          mIdx === 0 && row.committeeRole ? row.committeeRole : 'member'
+        await ensureSocietyRole(ctx, userId, userRole)
       }
     } catch (err) {
       importErrors.push({
@@ -209,30 +209,48 @@ async function linkUserToFlat(
     .onConflictDoNothing()
 }
 
-async function ensureMemberRole(ctx: ImportContext, userId: number) {
-  await ctx.db
-    .insert(societyRoles)
-    .values({
-      societyId: ctx.societyId,
-      userId,
-      role: 'member',
-      assignedBy: ctx.assignedByUserId,
-    })
-    .onConflictDoNothing()
-}
 
-async function ensureCommitteeRole(
+async function ensureSocietyRole(
   ctx: ImportContext,
   userId: number,
-  role: CommitteeRole
+  role: SocietyRole
 ) {
-  await ctx.db
-    .insert(societyRoles)
-    .values({
+  // Check if user already has any role in this society
+  const existing = await ctx.db
+    .select()
+    .from(societyRoles)
+    .where(
+      and(
+        eq(societyRoles.societyId, ctx.societyId),
+        eq(societyRoles.userId, userId)
+      )
+    )
+    .limit(1)
+
+  if (existing.length === 0) {
+    // First time — insert the role
+    await ctx.db.insert(societyRoles).values({
       societyId: ctx.societyId,
       userId,
       role,
       assignedBy: ctx.assignedByUserId,
     })
-    .onConflictDoNothing()
+    return
+  }
+
+  // User already has a role. If the new role is "higher" (committee role),
+  // upgrade it. If the new role is just 'member' but they already have a
+  // committee role, keep the committee role.
+  const currentRole = existing[0].role
+  const isCurrentCommittee = currentRole !== 'member'
+  const isNewCommittee = role !== 'member'
+
+  if (isNewCommittee && !isCurrentCommittee) {
+    // Upgrade member → committee
+    await ctx.db
+      .update(societyRoles)
+      .set({ role, assignedBy: ctx.assignedByUserId })
+      .where(eq(societyRoles.id, existing[0].id))
+  }
+  // Otherwise: keep existing role (committee role takes priority over member)
 }
