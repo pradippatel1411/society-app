@@ -8,6 +8,13 @@
       "when": 1777800996729,
       "tag": "0000_overrated_umar",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1777801818956,
+      "tag": "0001_mighty_smasher",
+      "breakpoints": true
     }
   ]
 }
