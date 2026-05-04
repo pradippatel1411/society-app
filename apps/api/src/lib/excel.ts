@@ -9,7 +9,7 @@ export type ExcelMemberRow = {
   ownerName: string
   mobile1: string
   mobile2: string | null
-  type: 'Owner' | 'Tenant' | 'Hybrid'
+  type: 'Owner' | 'Tenant'
   committeeRole: ExcelCommitteeRole | null
   rowIndex: number
 }
@@ -204,24 +204,23 @@ export function parseExcel(buffer: ArrayBuffer): ExcelParseResult {
     }
 
     // Type column
-    let type: 'Owner' | 'Tenant' | 'Hybrid' | null = null
+    let type: 'Owner' | 'Tenant' | null = null
     if (!typeRaw) {
       result.errors.push({
         rowIndex: rowNumber,
         field: 'Type',
         value: typeRaw,
-        message: 'Type is required (Owner / Tenant / Hybrid)',
+        message: 'Type is required (Owner / Tenant)',
       })
       hasError = true
     } else if (typeRaw === 'owner') type = 'Owner'
     else if (typeRaw === 'tenant') type = 'Tenant'
-    else if (typeRaw === 'hybrid') type = 'Hybrid'
     else {
       result.errors.push({
         rowIndex: rowNumber,
         field: 'Type',
         value: typeRaw,
-        message: 'Type must be Owner, Tenant, or Hybrid',
+        message: 'Type must be Owner or Tenant',
       })
       hasError = true
     }

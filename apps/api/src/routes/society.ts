@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { eq, and, inArray } from 'drizzle-orm'
+import { eq, and, inArray, desc } from 'drizzle-orm'
 import { getDb } from '../db/client'
 import {
   societies,
@@ -8,14 +8,17 @@ import {
   flatMembers,
   users,
   societyRoles,
+  maintenanceMaster,
+  flatPaymentTrack,
+  payments,
 } from '../db/schema'
 import { requireAuth, requireUserType } from '../lib/middleware'
 import { importMembersFromExcel } from '../lib/memberImport'
 import {
   COMMITTEE_ROLES,
-  SOCIETY_ROLES,
+  FREQUENCY_CYCLES,
   type SocietyRole,
-  type ResidencyType,
+  type MaintenanceFrequency,
 } from '../db/types'
 
 type Bindings = {
@@ -296,7 +299,7 @@ const addFlatSchema = z.object({
   block: z.string().min(1).max(20),
   flatNo: z.string().min(1).max(20),
   ownerName: z.string().min(1).max(200),
-  residencyType: z.enum(['owner', 'tenant', 'hybrid']).default('owner'),
+  residencyType: z.enum(['owner', 'tenant']).default('owner'),
   mobile1: z.string().regex(/^\d{10}$/),
   mobile2: z.string().regex(/^\d{10}$/).optional().nullable(),
   committeeRole: z
@@ -432,12 +435,7 @@ society.post('/:id/flats', async (c) => {
       userId = created.id
     }
 
-    const relation =
-      data.residencyType === 'tenant'
-        ? 'tenant'
-        : data.residencyType === 'hybrid'
-          ? 'owner'
-          : 'owner'
+    const relation = data.residencyType === 'tenant' ? 'tenant' : 'owner'
 
     await db
       .insert(flatMembers)
@@ -499,7 +497,7 @@ society.post('/:id/flats', async (c) => {
 // ────────────────────────────────────────────────────────────
 const editFlatSchema = z.object({
   ownerName: z.string().min(1).max(200).optional(),
-  residencyType: z.enum(['owner', 'tenant', 'hybrid']).optional(),
+  residencyType: z.enum(['owner', 'tenant']).optional(),
 })
 
 society.patch('/:id/flats/:flatId', async (c) => {
@@ -887,5 +885,558 @@ society.delete('/:id/flats/:flatId', async (c) => {
 
   return c.json({ success: true })
 })
+
+// ════════════════════════════════════════════════════════════
+// MAINTENANCE MASTER (per Financial Year)
+// ════════════════════════════════════════════════════════════
+
+// ────────────────────────────────────────────────────────────
+// GET /society/:id/maintenance-master
+// List all FY masters for this society (active + closed)
+// ────────────────────────────────────────────────────────────
+society.get('/:id/maintenance-master', async (c) => {
+  const societyId = getAuthorizedSocietyId(c)
+  if (!societyId) return c.json({ error: 'Forbidden' }, 403)
+
+  const db = getDb(c.env.DATABASE_URL)
+  const rows = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(eq(maintenanceMaster.societyId, societyId))
+    .orderBy(desc(maintenanceMaster.fyStartDate))
+
+  return c.json({ masters: rows })
+})
+
+// ────────────────────────────────────────────────────────────
+// GET /society/:id/maintenance-master/:masterId
+// Single FY master with summary (paid/unpaid counts, totals)
+// ────────────────────────────────────────────────────────────
+society.get('/:id/maintenance-master/:masterId', async (c) => {
+  const societyId = getAuthorizedSocietyId(c)
+  if (!societyId) return c.json({ error: 'Forbidden' }, 403)
+
+  const masterId = parseInt(c.req.param('masterId'), 10)
+  if (isNaN(masterId)) return c.json({ error: 'Invalid master id' }, 400)
+
+  const db = getDb(c.env.DATABASE_URL)
+  const [master] = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(
+      and(
+        eq(maintenanceMaster.id, masterId),
+        eq(maintenanceMaster.societyId, societyId)
+      )
+    )
+    .limit(1)
+  if (!master) return c.json({ error: 'Master not found' }, 404)
+
+  // Summary across all flat tracks
+  const tracks = await db
+    .select()
+    .from(flatPaymentTrack)
+    .where(eq(flatPaymentTrack.maintenanceMasterId, masterId))
+
+  const summary = {
+    totalFlats: tracks.length,
+    paid: tracks.filter((t) => t.status === 'paid').length,
+    unpaid: tracks.filter((t) => t.status === 'unpaid').length,
+    notStarted: tracks.filter((t) => t.frequency === null).length,
+    totalCollected: tracks.reduce((sum, t) => sum + t.paidAmount, 0),
+  }
+
+  return c.json({ master, summary })
+})
+
+// ────────────────────────────────────────────────────────────
+// POST /society/:id/maintenance-master
+// Chairman creates a new FY master and the system eagerly creates
+// one flat_payment_track row per flat (with frequency = null until
+// the flat's first payment).
+// ────────────────────────────────────────────────────────────
+const createMasterSchema = z
+  .object({
+    fyLabel: z.string().min(2).max(50),
+    fyStartDate: z.string(), // YYYY-MM-DD
+    fyEndDate: z.string(),
+
+    // Owner amounts — provide for each enabled frequency only
+    ownerMonthly: z.number().int().min(1).optional().nullable(),
+    ownerQuarterly: z.number().int().min(1).optional().nullable(),
+    ownerHalfYearly: z.number().int().min(1).optional().nullable(),
+    ownerYearly: z.number().int().min(1).optional().nullable(),
+
+    // Tenant amounts — provide for each enabled frequency only
+    tenantMonthly: z.number().int().min(1).optional().nullable(),
+    tenantQuarterly: z.number().int().min(1).optional().nullable(),
+    tenantHalfYearly: z.number().int().min(1).optional().nullable(),
+    tenantYearly: z.number().int().min(1).optional().nullable(),
+
+    // Penalty (informational — chairman handles offline)
+    penaltyPerDayOwner: z.number().int().min(0).optional(),
+    penaltyPerDayTenant: z.number().int().min(0).optional(),
+  })
+  .refine(
+    (d) => {
+      // At least one frequency must be enabled (both owner and tenant amounts present)
+      const hasMonthly = d.ownerMonthly != null && d.tenantMonthly != null
+      const hasQuarterly = d.ownerQuarterly != null && d.tenantQuarterly != null
+      const hasHalf = d.ownerHalfYearly != null && d.tenantHalfYearly != null
+      const hasYearly = d.ownerYearly != null && d.tenantYearly != null
+      return hasMonthly || hasQuarterly || hasHalf || hasYearly
+    },
+    {
+      message:
+        'Enable at least one frequency by providing both owner and tenant amounts for it',
+    }
+  )
+  .refine(
+    (d) => {
+      // For each frequency, if one of (owner, tenant) is given the other must be too
+      const checks: [
+        keyof typeof d & string,
+        keyof typeof d & string,
+        string
+      ][] = [
+        ['ownerMonthly', 'tenantMonthly', 'monthly'],
+        ['ownerQuarterly', 'tenantQuarterly', 'quarterly'],
+        ['ownerHalfYearly', 'tenantHalfYearly', 'half_yearly'],
+        ['ownerYearly', 'tenantYearly', 'yearly'],
+      ]
+      for (const [oKey, tKey] of checks) {
+        const oVal = d[oKey]
+        const tVal = d[tKey]
+        if ((oVal == null) !== (tVal == null)) return false
+      }
+      return true
+    },
+    {
+      message:
+        'For each enabled frequency, both owner and tenant amounts must be provided',
+    }
+  )
+
+society.post('/:id/maintenance-master', async (c) => {
+  const societyId = getAuthorizedSocietyId(c, ['chairman', 'secretary'])
+  if (!societyId) {
+    return c.json(
+      { error: 'Forbidden — chairman/secretary access required' },
+      403
+    )
+  }
+
+  const body = await c.req.json().catch(() => null)
+  const parsed = createMasterSchema.safeParse(body)
+  if (!parsed.success) {
+    return c.json(
+      { error: 'Invalid input', details: parsed.error.flatten() },
+      400
+    )
+  }
+
+  const data = parsed.data
+  const fyStartDate = new Date(data.fyStartDate)
+  const fyEndDate = new Date(data.fyEndDate)
+  if (fyEndDate <= fyStartDate) {
+    return c.json({ error: 'FY end date must be after FY start date' }, 400)
+  }
+
+  const db = getDb(c.env.DATABASE_URL)
+
+  // Check for duplicate fy_label in this society
+  const [existing] = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(
+      and(
+        eq(maintenanceMaster.societyId, societyId),
+        eq(maintenanceMaster.fyLabel, data.fyLabel)
+      )
+    )
+    .limit(1)
+  if (existing) {
+    return c.json(
+      { error: `An FY master with label "${data.fyLabel}" already exists` },
+      409
+    )
+  }
+
+  // Get all flats — needed to eagerly create tracks
+  const allFlats = await db
+    .select()
+    .from(flats)
+    .where(eq(flats.societyId, societyId))
+  if (allFlats.length === 0) {
+    return c.json({ error: 'No flats in this society yet' }, 400)
+  }
+
+  // Create the master row
+  const [master] = await db
+    .insert(maintenanceMaster)
+    .values({
+      societyId,
+      fyLabel: data.fyLabel,
+      fyStartDate,
+      fyEndDate,
+      ownerMonthly: data.ownerMonthly ?? null,
+      ownerQuarterly: data.ownerQuarterly ?? null,
+      ownerHalfYearly: data.ownerHalfYearly ?? null,
+      ownerYearly: data.ownerYearly ?? null,
+      tenantMonthly: data.tenantMonthly ?? null,
+      tenantQuarterly: data.tenantQuarterly ?? null,
+      tenantHalfYearly: data.tenantHalfYearly ?? null,
+      tenantYearly: data.tenantYearly ?? null,
+      penaltyPerDayOwner: data.penaltyPerDayOwner ?? 0,
+      penaltyPerDayTenant: data.penaltyPerDayTenant ?? 0,
+      status: 'active',
+    })
+    .returning()
+
+  // Eagerly create flat_payment_track for every flat (frequency = null
+  // until that flat's first payment)
+  const trackRows = allFlats.map((f) => ({
+    maintenanceMasterId: master.id,
+    flatId: f.id,
+    frequency: null as MaintenanceFrequency | null,
+    totalAmount: null,
+    paidAmount: 0,
+    status: 'unpaid' as const,
+  }))
+  await db.insert(flatPaymentTrack).values(trackRows)
+
+  return c.json({
+    success: true,
+    master,
+    tracksCreated: trackRows.length,
+  })
+})
+
+// ────────────────────────────────────────────────────────────
+// PATCH /society/:id/maintenance-master/:masterId/close
+// Chairman closes an FY master (no more payments accepted)
+// ────────────────────────────────────────────────────────────
+society.patch('/:id/maintenance-master/:masterId/close', async (c) => {
+  const societyId = getAuthorizedSocietyId(c, ['chairman'])
+  if (!societyId) {
+    return c.json({ error: 'Forbidden — chairman access required' }, 403)
+  }
+
+  const masterId = parseInt(c.req.param('masterId'), 10)
+  if (isNaN(masterId)) return c.json({ error: 'Invalid master id' }, 400)
+
+  const db = getDb(c.env.DATABASE_URL)
+  const [master] = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(
+      and(
+        eq(maintenanceMaster.id, masterId),
+        eq(maintenanceMaster.societyId, societyId)
+      )
+    )
+    .limit(1)
+  if (!master) return c.json({ error: 'Master not found' }, 404)
+
+  const [updated] = await db
+    .update(maintenanceMaster)
+    .set({ status: 'closed' })
+    .where(eq(maintenanceMaster.id, masterId))
+    .returning()
+
+  return c.json({ success: true, master: updated })
+})
+
+// ────────────────────────────────────────────────────────────
+// GET /society/:id/maintenance-master/:masterId/tracks
+// List all flat tracks for a master with status (chairman dashboard)
+// ────────────────────────────────────────────────────────────
+society.get('/:id/maintenance-master/:masterId/tracks', async (c) => {
+  const societyId = getAuthorizedSocietyId(c)
+  if (!societyId) return c.json({ error: 'Forbidden' }, 403)
+
+  const masterId = parseInt(c.req.param('masterId'), 10)
+  if (isNaN(masterId)) return c.json({ error: 'Invalid master id' }, 400)
+
+  const db = getDb(c.env.DATABASE_URL)
+
+  const [master] = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(
+      and(
+        eq(maintenanceMaster.id, masterId),
+        eq(maintenanceMaster.societyId, societyId)
+      )
+    )
+    .limit(1)
+  if (!master) return c.json({ error: 'Master not found' }, 404)
+
+  const rows = await db
+    .select({
+      trackId: flatPaymentTrack.id,
+      flatId: flats.id,
+      block: flats.block,
+      flatNo: flats.flatNo,
+      ownerName: flats.ownerName,
+      residencyType: flats.residencyType,
+      frequency: flatPaymentTrack.frequency,
+      totalAmount: flatPaymentTrack.totalAmount,
+      paidAmount: flatPaymentTrack.paidAmount,
+      status: flatPaymentTrack.status,
+      updatedAt: flatPaymentTrack.updatedAt,
+    })
+    .from(flatPaymentTrack)
+    .innerJoin(flats, eq(flatPaymentTrack.flatId, flats.id))
+    .where(eq(flatPaymentTrack.maintenanceMasterId, masterId))
+
+  // Sort: unpaid first, then by block + flat number
+  rows.sort((a, b) => {
+    if (a.status !== b.status) return a.status === 'unpaid' ? -1 : 1
+    if (a.block !== b.block) return a.block.localeCompare(b.block)
+    return a.flatNo.localeCompare(b.flatNo, undefined, { numeric: true })
+  })
+
+  return c.json({ tracks: rows })
+})
+
+// ════════════════════════════════════════════════════════════
+// PAYMENT RECORDING (manual mode — chairman/secretary/cashier)
+// Razorpay self-pay flow will be added in a future step.
+// ════════════════════════════════════════════════════════════
+
+// ────────────────────────────────────────────────────────────
+// POST /society/:id/maintenance-master/:masterId/payments
+// Committee records a manual payment (cash/cheque/upi-screenshot).
+// Locks frequency for the flat on first payment for this FY.
+// ────────────────────────────────────────────────────────────
+const recordPaymentSchema = z.object({
+  flatId: z.number().int().positive(),
+  frequency: z.enum(['monthly', 'quarterly', 'half_yearly', 'yearly']),
+  amount: z.number().int().min(1),
+  mode: z.enum(['upi', 'cash', 'cheque', 'manual']),
+  gatewayTxnId: z.string().max(200).optional().nullable(),
+  notes: z.string().max(1000).optional().nullable(),
+})
+
+society.post('/:id/maintenance-master/:masterId/payments', async (c) => {
+  const societyId = getAuthorizedSocietyId(c, [
+    'chairman',
+    'secretary',
+    'cashier',
+  ])
+  if (!societyId) {
+    return c.json(
+      { error: 'Forbidden — committee access required' },
+      403
+    )
+  }
+
+  const masterId = parseInt(c.req.param('masterId'), 10)
+  if (isNaN(masterId)) return c.json({ error: 'Invalid master id' }, 400)
+
+  const body = await c.req.json().catch(() => null)
+  const parsed = recordPaymentSchema.safeParse(body)
+  if (!parsed.success) {
+    return c.json(
+      { error: 'Invalid input', details: parsed.error.flatten() },
+      400
+    )
+  }
+  const data = parsed.data
+  const db = getDb(c.env.DATABASE_URL)
+
+  // Verify master exists and is active
+  const [master] = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(
+      and(
+        eq(maintenanceMaster.id, masterId),
+        eq(maintenanceMaster.societyId, societyId)
+      )
+    )
+    .limit(1)
+  if (!master) return c.json({ error: 'Master not found' }, 404)
+  if (master.status !== 'active') {
+    return c.json({ error: 'This FY is closed; cannot record payments' }, 400)
+  }
+
+  // Verify flat is in this society
+  const [flat] = await db
+    .select()
+    .from(flats)
+    .where(and(eq(flats.id, data.flatId), eq(flats.societyId, societyId)))
+    .limit(1)
+  if (!flat) return c.json({ error: 'Flat not found in this society' }, 404)
+
+  // Determine the frequency amount from master based on residency
+  const freqAmount = pickFrequencyAmount(master, flat.residencyType, data.frequency)
+  if (freqAmount == null) {
+    return c.json(
+      {
+        error: `Frequency "${data.frequency}" is not enabled for ${flat.residencyType}s in this FY`,
+      },
+      400
+    )
+  }
+
+  // Amount must be a positive multiple of freqAmount
+  if (data.amount <= 0 || data.amount % freqAmount !== 0) {
+    return c.json(
+      {
+        error: `Amount must be a multiple of ₹${freqAmount} (the ${data.frequency} amount). For ${data.frequency}: pay ₹${freqAmount} or ₹${freqAmount * 2} or ₹${freqAmount * 3}, etc.`,
+      },
+      400
+    )
+  }
+
+  // Get or create the flat_payment_track
+  const [existingTrack] = await db
+    .select()
+    .from(flatPaymentTrack)
+    .where(
+      and(
+        eq(flatPaymentTrack.maintenanceMasterId, masterId),
+        eq(flatPaymentTrack.flatId, data.flatId)
+      )
+    )
+    .limit(1)
+
+  let trackId: number
+  let lockedFrequency: MaintenanceFrequency
+  let totalAmount: number
+  let currentPaid: number
+
+  if (!existingTrack) {
+    // Should not happen normally (we eagerly create) but handle defensively
+    const cycles = FREQUENCY_CYCLES[data.frequency]
+    totalAmount = freqAmount * cycles
+    const [created] = await db
+      .insert(flatPaymentTrack)
+      .values({
+        maintenanceMasterId: masterId,
+        flatId: data.flatId,
+        frequency: data.frequency,
+        totalAmount,
+        paidAmount: 0,
+        status: 'unpaid',
+      })
+      .returning()
+    trackId = created.id
+    lockedFrequency = data.frequency
+    currentPaid = 0
+  } else {
+    if (existingTrack.frequency === null) {
+      // First payment for this flat — lock frequency
+      const cycles = FREQUENCY_CYCLES[data.frequency]
+      totalAmount = freqAmount * cycles
+      lockedFrequency = data.frequency
+      await db
+        .update(flatPaymentTrack)
+        .set({
+          frequency: data.frequency,
+          totalAmount,
+          updatedAt: new Date(),
+        })
+        .where(eq(flatPaymentTrack.id, existingTrack.id))
+      trackId = existingTrack.id
+      currentPaid = existingTrack.paidAmount
+    } else {
+      if (existingTrack.frequency !== data.frequency) {
+        return c.json(
+          {
+            error: `This flat's frequency is locked to "${existingTrack.frequency}" for this FY. Cannot change to "${data.frequency}".`,
+          },
+          400
+        )
+      }
+      lockedFrequency = existingTrack.frequency
+      totalAmount = existingTrack.totalAmount ?? freqAmount * FREQUENCY_CYCLES[lockedFrequency]
+      trackId = existingTrack.id
+      currentPaid = existingTrack.paidAmount
+    }
+
+    if (existingTrack.status === 'paid') {
+      return c.json(
+        { error: 'This flat is already fully paid for this FY' },
+        400
+      )
+    }
+  }
+
+  // Cannot exceed outstanding
+  const outstanding = totalAmount - currentPaid
+  if (data.amount > outstanding) {
+    return c.json(
+      {
+        error: `Cannot pay ₹${data.amount}. Only ₹${outstanding} is outstanding for this FY.`,
+      },
+      400
+    )
+  }
+
+  // Insert payment row
+  const [payment] = await db
+    .insert(payments)
+    .values({
+      maintenanceMasterId: masterId,
+      flatId: data.flatId,
+      paidByUserId: c.get('user').userId,
+      frequency: lockedFrequency,
+      amount: data.amount,
+      mode: data.mode,
+      gateway: null,
+      gatewayTxnId: data.gatewayTxnId ?? null,
+      status: 'success',
+      notes: data.notes ?? null,
+    })
+    .returning()
+
+  // Update track
+  const newPaid = currentPaid + data.amount
+  const newStatus = newPaid >= totalAmount ? 'paid' : 'unpaid'
+  await db
+    .update(flatPaymentTrack)
+    .set({
+      paidAmount: newPaid,
+      status: newStatus,
+      updatedAt: new Date(),
+    })
+    .where(eq(flatPaymentTrack.id, trackId))
+
+  return c.json({
+    success: true,
+    payment,
+    track: {
+      id: trackId,
+      frequency: lockedFrequency,
+      totalAmount,
+      paidAmount: newPaid,
+      status: newStatus,
+      outstanding: totalAmount - newPaid,
+    },
+  })
+})
+
+// Helper used by record-payment route
+function pickFrequencyAmount(
+  master: typeof maintenanceMaster.$inferSelect,
+  residency: 'owner' | 'tenant',
+  freq: MaintenanceFrequency
+): number | null {
+  if (residency === 'owner') {
+    if (freq === 'monthly') return master.ownerMonthly
+    if (freq === 'quarterly') return master.ownerQuarterly
+    if (freq === 'half_yearly') return master.ownerHalfYearly
+    if (freq === 'yearly') return master.ownerYearly
+  } else {
+    if (freq === 'monthly') return master.tenantMonthly
+    if (freq === 'quarterly') return master.tenantQuarterly
+    if (freq === 'half_yearly') return master.tenantHalfYearly
+    if (freq === 'yearly') return master.tenantYearly
+  }
+  return null
+}
 
 export default society

@@ -17,9 +17,9 @@ import {
   ResidencyType,
   FlatMemberRelation,
   SocietyRole,
-  MaintenancePeriodType,
-  MaintenancePeriodStatus,
-  DueStatus,
+  MaintenanceFrequency,
+  MaintenanceMasterStatus,
+  PaymentTrackStatus,
   PaymentMode,
   PaymentStatus,
   PaymentGateway,
@@ -184,100 +184,113 @@ export const societyRoles = pgTable(
 )
 
 // ============================================================
-// Table 7: maintenance_configs
-// Per society: how much, when, penalty rate
+// Table 7: maintenance_master
+// Chairman creates one entry per Financial Year per society.
+// Sets enabled frequencies + amount for each enabled frequency.
+// Only fill columns for frequencies you enable; leave others null.
 // ============================================================
-export const maintenanceConfigs = pgTable('maintenance_configs', {
-  id: serial('id').primaryKey(),
-  societyId: integer('society_id')
-    .notNull()
-    .references(() => societies.id, { onDelete: 'cascade' })
-    .unique(),
-  periodType: varchar('period_type', { length: 20 })
-    .$type<MaintenancePeriodType>()
-    .default('yearly')
-    .notNull(),
-  ownerAmount: integer('owner_amount').notNull(),
-  tenantAmount: integer('tenant_amount').notNull(),
-  penaltyPerDay: integer('penalty_per_day').default(0).notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-})
-
-// ============================================================
-// Table 8: maintenance_periods
-// e.g., "Apr 2026 to Mar 2027"
-// ============================================================
-export const maintenancePeriods = pgTable('maintenance_periods', {
+export const maintenanceMaster = pgTable('maintenance_master', {
   id: serial('id').primaryKey(),
   societyId: integer('society_id')
     .notNull()
     .references(() => societies.id, { onDelete: 'cascade' }),
-  name: varchar('name', { length: 100 }).notNull(),
-  startDate: timestamp('start_date').notNull(),
-  endDate: timestamp('end_date').notNull(),
-  dueDate: timestamp('due_date').notNull(),
+  fyLabel: varchar('fy_label', { length: 50 }).notNull(),
+  fyStartDate: timestamp('fy_start_date').notNull(),
+  fyEndDate: timestamp('fy_end_date').notNull(),
+
+  // Owner amounts — fill only enabled frequencies, leave others null
+  ownerMonthly: integer('owner_monthly'),
+  ownerQuarterly: integer('owner_quarterly'),
+  ownerHalfYearly: integer('owner_half_yearly'),
+  ownerYearly: integer('owner_yearly'),
+
+  // Tenant amounts — fill only enabled frequencies
+  tenantMonthly: integer('tenant_monthly'),
+  tenantQuarterly: integer('tenant_quarterly'),
+  tenantHalfYearly: integer('tenant_half_yearly'),
+  tenantYearly: integer('tenant_yearly'),
+
+  // Penalty (informational only — chairman handles offline)
+  penaltyPerDayOwner: integer('penalty_per_day_owner').default(0),
+  penaltyPerDayTenant: integer('penalty_per_day_tenant').default(0),
+
   status: varchar('status', { length: 20 })
-    .$type<MaintenancePeriodStatus>()
+    .$type<MaintenanceMasterStatus>()
     .default('active')
     .notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })
 
 // ============================================================
-// Table 9: dues
-// One row per flat per period
+// Table 8: flat_payment_track
+// One row per flat per FY master. Eagerly created when master is
+// created. Tracks the locked frequency + total + paid amount.
+//
+// frequency and totalAmount are null until the flat's first payment.
+// On first payment, both get set based on the chosen frequency.
 // ============================================================
-export const dues = pgTable(
-  'dues',
+export const flatPaymentTrack = pgTable(
+  'flat_payment_track',
   {
     id: serial('id').primaryKey(),
-    periodId: integer('period_id')
+    maintenanceMasterId: integer('maintenance_master_id')
       .notNull()
-      .references(() => maintenancePeriods.id, { onDelete: 'cascade' }),
+      .references(() => maintenanceMaster.id, { onDelete: 'cascade' }),
     flatId: integer('flat_id')
       .notNull()
       .references(() => flats.id, { onDelete: 'cascade' }),
-    baseAmount: integer('base_amount').notNull(),
-    hybridOverrideAmount: integer('hybrid_override_amount'),
+    // Locked frequency — set on first payment, then unchangeable
+    frequency: varchar('frequency', { length: 20 }).$type<MaintenanceFrequency>(),
+    // Total FY amount = freq_amount × cycles_per_year (set on first payment)
+    totalAmount: integer('total_amount'),
     paidAmount: integer('paid_amount').default(0).notNull(),
-    penaltyAmount: integer('penalty_amount').default(0).notNull(),
     status: varchar('status', { length: 20 })
-      .$type<DueStatus>()
+      .$type<PaymentTrackStatus>()
       .default('unpaid')
       .notNull(),
-    paidAt: timestamp('paid_at'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
   (table) => [
-    uniqueIndex('flat_period_idx').on(table.periodId, table.flatId),
+    uniqueIndex('flat_master_idx').on(
+      table.maintenanceMasterId,
+      table.flatId
+    ),
   ]
 )
 
 // ============================================================
-// Table 10: payments
-// Every payment attempt and result
+// Table 9: payments
+// Each successful payment a member made for a maintenance master.
+// Multiple payments can exist for one flat_payment_track.
 // ============================================================
 export const payments = pgTable('payments', {
   id: serial('id').primaryKey(),
-  dueId: integer('due_id')
+  maintenanceMasterId: integer('maintenance_master_id')
     .notNull()
-    .references(() => dues.id, { onDelete: 'cascade' }),
+    .references(() => maintenanceMaster.id, { onDelete: 'cascade' }),
+  flatId: integer('flat_id')
+    .notNull()
+    .references(() => flats.id, { onDelete: 'cascade' }),
   paidByUserId: integer('paid_by_user_id').references(() => users.id),
+  frequency: varchar('frequency', { length: 20 })
+    .$type<MaintenanceFrequency>()
+    .notNull(),
   amount: integer('amount').notNull(),
   mode: varchar('mode', { length: 20 }).$type<PaymentMode>().notNull(),
-  gatewayTxnId: varchar('gateway_txn_id', { length: 200 }),
   gateway: varchar('gateway', { length: 50 }).$type<PaymentGateway>(),
+  gatewayTxnId: varchar('gateway_txn_id', { length: 200 }),
   status: varchar('status', { length: 20 })
     .$type<PaymentStatus>()
-    .default('pending')
+    .default('success')
     .notNull(),
   notes: text('notes'),
   receiptUrl: text('receipt_url'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
+  paidAt: timestamp('paid_at').defaultNow().notNull(),
 })
 
 // ============================================================
-// Table 11: otps
+// Table 10: otps
 // Sent OTPs awaiting verification. Cleaned up periodically.
 // ============================================================
 export const otps = pgTable(
@@ -313,8 +326,7 @@ export const societiesRelations = relations(societies, ({ one, many }) => ({
   }),
   flats: many(flats),
   roles: many(societyRoles),
-  config: one(maintenanceConfigs),
-  periods: many(maintenancePeriods),
+  maintenanceMasters: many(maintenanceMaster),
 }))
 
 export const flatsRelations = relations(flats, ({ one, many }) => ({
@@ -323,7 +335,8 @@ export const flatsRelations = relations(flats, ({ one, many }) => ({
     references: [societies.id],
   }),
   members: many(flatMembers),
-  dues: many(dues),
+  paymentTracks: many(flatPaymentTrack),
+  payments: many(payments),
 }))
 
 export const flatMembersRelations = relations(flatMembers, ({ one }) => ({
@@ -357,33 +370,40 @@ export const societyRolesRelations = relations(societyRoles, ({ one }) => ({
   }),
 }))
 
-export const maintenancePeriodsRelations = relations(
-  maintenancePeriods,
+export const maintenanceMasterRelations = relations(
+  maintenanceMaster,
   ({ one, many }) => ({
     society: one(societies, {
-      fields: [maintenancePeriods.societyId],
+      fields: [maintenanceMaster.societyId],
       references: [societies.id],
     }),
-    dues: many(dues),
+    tracks: many(flatPaymentTrack),
+    payments: many(payments),
   })
 )
 
-export const duesRelations = relations(dues, ({ one, many }) => ({
-  period: one(maintenancePeriods, {
-    fields: [dues.periodId],
-    references: [maintenancePeriods.id],
-  }),
-  flat: one(flats, {
-    fields: [dues.flatId],
-    references: [flats.id],
-  }),
-  payments: many(payments),
-}))
+export const flatPaymentTrackRelations = relations(
+  flatPaymentTrack,
+  ({ one }) => ({
+    master: one(maintenanceMaster, {
+      fields: [flatPaymentTrack.maintenanceMasterId],
+      references: [maintenanceMaster.id],
+    }),
+    flat: one(flats, {
+      fields: [flatPaymentTrack.flatId],
+      references: [flats.id],
+    }),
+  })
+)
 
 export const paymentsRelations = relations(payments, ({ one }) => ({
-  due: one(dues, {
-    fields: [payments.dueId],
-    references: [dues.id],
+  master: one(maintenanceMaster, {
+    fields: [payments.maintenanceMasterId],
+    references: [maintenanceMaster.id],
+  }),
+  flat: one(flats, {
+    fields: [payments.flatId],
+    references: [flats.id],
   }),
   paidByUser: one(users, {
     fields: [payments.paidByUserId],

@@ -118,8 +118,7 @@ async function upsertFlat(
   onInsert: () => void,
   onUpdate: () => void
 ): Promise<number> {
-  const residencyType =
-    row.type === 'Owner' ? 'owner' : row.type === 'Tenant' ? 'tenant' : 'hybrid'
+  const residencyType = row.type === 'Tenant' ? 'tenant' : 'owner'
 
   const [existing] = await ctx.db
     .select()
@@ -200,8 +199,7 @@ async function linkUserToFlat(
   row: ExcelMemberRow,
   isPrimary: boolean
 ) {
-  const relation =
-    row.type === 'Owner' ? 'owner' : row.type === 'Tenant' ? 'tenant' : 'owner'
+  const relation = row.type === 'Tenant' ? 'tenant' : 'owner'
 
   await ctx.db
     .insert(flatMembers)

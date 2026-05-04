@@ -7,6 +7,7 @@ import owner from './routes/owner'
 import publicRoutes from './routes/public'
 import superAdmin from './routes/superAdmin'
 import society from './routes/society'
+import member from './routes/member'
 
 type Bindings = {
   DATABASE_URL: string
@@ -64,5 +65,6 @@ app.route('/owner', owner)
 app.route('/public', publicRoutes)
 app.route('/super-admin', superAdmin)
 app.route('/society', society)
+app.route('/member', member)
 
 export default app

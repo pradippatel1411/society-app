@@ -1,0 +1,114 @@
+Step 1 — Product owner logs inpowershell
+# Send OTP to your owner mobile
+$body = @{ mobile="8734032255"; scope="owner" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:8787/auth/sendOTP" -Method Post -Body $body -ContentType "application/json"
+
+
+# Verify OTP and capture the owner token
+$body = @{ mobile="8734032255"; otp="000000"; scope="owner" } | ConvertTo-Json
+$ownerLogin = Invoke-RestMethod -Uri "http://localhost:8787/auth/verifyOTP" -Method Post -Body $body -ContentType "application/json"
+$ownerToken = $ownerLogin.token
+$ownerHeaders = @{ Authorization = "Bearer $ownerToken" }
+
+Write-Host "Owner logged in: $($ownerLogin.user.userType)" -ForegroundColor Green
+
+step 3 Owner add super admin
+$body = @{
+  name = "Acme Society Services"
+  slug = "acme"
+  contactMobile = "9876543210"
+  contactEmail = "ram@acme.com"
+  brandColor = "#1e40af"
+  planAmount = 50000
+  planStartDate = "2026-05-01"
+  planEndDate = "2027-04-30"
+} | ConvertTo-Json
+
+$createSA = Invoke-RestMethod -Uri "http://localhost:8787/owner/super-admins" -Method Post -Body $body -ContentType "application/json" -Headers $ownerHeaders
+
+$superAdminId = $createSA.superAdmin.id
+Write-Host "Super admin created — id: $superAdminId, slug: $($createSA.superAdmin.slug)" -ForegroundColor Green
+
+
+Step 4 — Super admin (Ram) logs in
+# Wait if needed for OTP cooldown — different mobile but same scope might trigger it
+Start-Sleep -Seconds 31
+
+# Ram's portal: scope=super_admin, scopeRef=acme (his slug)
+$body = @{ mobile="9876543210"; scope="super_admin"; scopeRef="acme" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:8787/auth/sendOTP" -Method Post -Body $body -ContentType "application/json"
+
+step5
+# Verify OTP and capture Ram's token
+$body = @{ mobile="9876543210"; otp="000000"; scope="super_admin" } | ConvertTo-Json
+$ramLogin = Invoke-RestMethod -Uri "http://localhost:8787/auth/verifyOTP" -Method Post -Body $body -ContentType "application/json"
+$ramToken = $ramLogin.token
+$ramHeaders = @{ Authorization = "Bearer $ramToken" }
+
+Write-Host "Ram logged in: $($ramLogin.user.userType), superAdminId: $($ramLogin.user.superAdminId)" -ForegroundColor Green
+
+
+Step 6 — Ram creates a society
+$body = @{
+  name = "Green Park Co-op"
+  slug = "greenpark"
+  address = "Sector 12, Mumbai"
+  totalFlats = 0
+  planAmount = 10000
+  planStartDate = "2026-05-01"
+  planEndDate = "2027-04-30"
+} | ConvertTo-Json
+
+$createSoc = Invoke-RestMethod -Uri "http://localhost:8787/super-admin/societies" -Method Post -Body $body -ContentType "application/json" -Headers $ramHeaders
+
+$societyId = $createSoc.society.id
+Write-Host "Society created — id: $societyId, slug: $($createSoc.society.slug)" -ForegroundColor Green
+
+
+Step 7 — Ram uploads the member Excel
+$response = Invoke-RestMethod -Uri "http://localhost:8787/super-admin/societies/$societyId/upload-members" `
+  -Method Post `
+  -InFile "test-data\members.xlsx" `
+  -ContentType "application/octet-stream" `
+  -Headers $ramHeaders
+
+Write-Host "Excel imported — parsed: $($response.rowsParsed), inserted: $($response.flatsInserted), updated: $($response.flatsUpdated)" -ForegroundColor Green
+
+A society member can now log in
+Start-Sleep -Seconds 31
+
+# Sharma is the chairman
+$body = @{ mobile="9988776655"; scope="society"; scopeRef="acme/greenpark" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:8787/auth/sendOTP" -Method Post -Body $body -ContentType "application/json"
+
+$body = @{ mobile="9988776655"; otp="000000"; scope="society" } | ConvertTo-Json
+$sharmaLogin = Invoke-RestMethod -Uri "http://localhost:8787/auth/verifyOTP" -Method Post -Body $body -ContentType "application/json"
+$sharmaHeaders = @{ Authorization = "Bearer $($sharmaLogin.token)" }
+
+Write-Host "Sharma logged in. Roles:" -ForegroundColor Green
+$sharmaLogin.user.societyRoles
+
+
+
+
+Test 1 — Chairman creates FY 2026-27 with 2 frequencies enabled
+Sharma enables only half_yearly and yearly for this FY (no monthly/quarterly):
+$body = @{
+  fyLabel = "FY 2026-27"
+  fyStartDate = "2026-04-01"
+  fyEndDate = "2027-03-31"
+  
+  ownerHalfYearly = 8500
+  ownerYearly = 15000
+  
+  tenantHalfYearly = 12500
+  tenantYearly = 22000
+  
+  penaltyPerDayOwner = 50
+  penaltyPerDayTenant = 75
+} | ConvertTo-Json
+
+$masterResp = Invoke-RestMethod -Uri "http://localhost:8787/society/$societyId/maintenance-master" -Method Post -Body $body -ContentType "application/json" -Headers $sharmaHeaders
+
+$masterId = $masterResp.master.id
+Write-Host "FY master created — id: $masterId, tracks: $($masterResp.tracksCreated)" -ForegroundColor Green

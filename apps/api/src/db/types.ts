@@ -22,7 +22,8 @@ export const SOCIETY_STATUS = [
 ] as const
 export type SocietyStatus = (typeof SOCIETY_STATUS)[number]
 
-export const RESIDENCY_TYPES = ['owner', 'tenant', 'hybrid'] as const
+// Hybrid removed — only owner or tenant
+export const RESIDENCY_TYPES = ['owner', 'tenant'] as const
 export type ResidencyType = (typeof RESIDENCY_TYPES)[number]
 
 export const FLAT_MEMBER_RELATIONS = ['owner', 'tenant', 'family'] as const
@@ -46,18 +47,36 @@ export const COMMITTEE_ROLES = [
 ] as const
 export type CommitteeRole = (typeof COMMITTEE_ROLES)[number]
 
-export const MAINTENANCE_PERIOD_TYPES = ['yearly', 'half_yearly'] as const
-export type MaintenancePeriodType = (typeof MAINTENANCE_PERIOD_TYPES)[number]
+// Maintenance frequencies a chairman can enable for an FY
+export const MAINTENANCE_FREQUENCIES = [
+  'monthly',
+  'quarterly',
+  'half_yearly',
+  'yearly',
+] as const
+export type MaintenanceFrequency = (typeof MAINTENANCE_FREQUENCIES)[number]
 
-export const MAINTENANCE_PERIOD_STATUS = ['active', 'closed'] as const
-export type MaintenancePeriodStatus = (typeof MAINTENANCE_PERIOD_STATUS)[number]
+// Cycles per year for each frequency — used to compute total FY amount
+export const FREQUENCY_CYCLES: Record<MaintenanceFrequency, number> = {
+  monthly: 12,
+  quarterly: 4,
+  half_yearly: 2,
+  yearly: 1,
+}
 
-export const DUE_STATUS = ['unpaid', 'partial', 'paid'] as const
-export type DueStatus = (typeof DUE_STATUS)[number]
+// Master FY status
+export const MAINTENANCE_MASTER_STATUS = ['active', 'closed'] as const
+export type MaintenanceMasterStatus = (typeof MAINTENANCE_MASTER_STATUS)[number]
 
+// Payment track per flat per FY
+export const PAYMENT_TRACK_STATUS = ['unpaid', 'paid'] as const
+export type PaymentTrackStatus = (typeof PAYMENT_TRACK_STATUS)[number]
+
+// How a payment was made
 export const PAYMENT_MODES = ['upi', 'cash', 'cheque', 'manual'] as const
 export type PaymentMode = (typeof PAYMENT_MODES)[number]
 
+// Payment lifecycle status (kept for future Razorpay flow: pending → success/failed)
 export const PAYMENT_STATUS = ['pending', 'success', 'failed'] as const
 export type PaymentStatus = (typeof PAYMENT_STATUS)[number]
 
