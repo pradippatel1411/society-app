@@ -40,9 +40,8 @@ export default function SuperAdminLogin() {
       navigate(`/${slug}/dashboard`, { replace: true })
     }
   }, [isAuthenticated, user, slug, navigate])
-
-  // Load branding
-  // Load branding
+  
+// Load branding
 useEffect(() => {
   if (!slug) return
   let cancelled = false
@@ -50,11 +49,22 @@ useEffect(() => {
   ;(async () => {
     try {
       const res = await api<{
-        name: string
-        brandColor: string
-        logoUrl: string | null
+        superAdmin: {
+          id: number
+          slug: string
+          name: string
+          brandColor: string
+          logoUrl: string | null
+          status: string
+        }
       }>(`/public/branding/${slug}`)
-      if (!cancelled) setBranding(res)
+      if (!cancelled) {
+        setBranding({
+          name: res.superAdmin.name,
+          brandColor: res.superAdmin.brandColor || "#1A1F2E",
+          logoUrl: res.superAdmin.logoUrl,
+        })
+      }
     } catch {
       if (!cancelled) setBrandingError("Invalid portal link")
     } finally {

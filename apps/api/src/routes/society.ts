@@ -293,15 +293,15 @@ society.get('/:id/blocks', async (c) => {
 
 // ────────────────────────────────────────────────────────────
 // POST /society/:id/flats
-// Add a single new flat with optional 1-2 members
+// Add a single new flat. Mobile is optional — for vacant flats, just create
+// the flat row. Members can be attached later via Add Member to Flat.
 // ────────────────────────────────────────────────────────────
 const addFlatSchema = z.object({
   block: z.string().min(1).max(20),
   flatNo: z.string().min(1).max(20),
-  ownerName: z.string().min(1).max(200),
+  ownerName: z.string().min(1).max(200).optional().nullable(),
   residencyType: z.enum(['owner', 'tenant']).default('owner'),
-  mobile1: z.string().regex(/^\d{10}$/),
-  mobile2: z.string().regex(/^\d{10}$/).optional().nullable(),
+  mobile: z.string().regex(/^\d{10}$/).optional().nullable(),
   committeeRole: z
     .enum(['chairman', 'secretary', 'cashier', 'committee'])
     .optional()
@@ -327,8 +327,13 @@ society.post('/:id/flats', async (c) => {
   }
 
   const data = parsed.data
-  if (data.mobile2 && data.mobile1 === data.mobile2) {
-    return c.json({ error: 'Mobile 1 and Mobile 2 cannot be the same' }, 400)
+
+  // Cross-validation: committee role requires mobile
+  if (data.committeeRole && !data.mobile) {
+    return c.json(
+      { error: 'Committee role requires a mobile — vacant flats cannot have a role assigned' },
+      400
+    )
   }
 
   const db = getDb(c.env.DATABASE_URL)
@@ -395,7 +400,7 @@ society.post('/:id/flats', async (c) => {
       societyId,
       block,
       flatNo: data.flatNo,
-      ownerName: data.ownerName,
+      ownerName: data.ownerName ?? null,
       residencyType: data.residencyType,
     })
     .returning()
@@ -473,9 +478,8 @@ society.post('/:id/flats', async (c) => {
     return userId
   }
 
-  await upsertUserAndLink(data.mobile1, true, data.ownerName)
-  if (data.mobile2) {
-    await upsertUserAndLink(data.mobile2, false, null)
+  if (data.mobile) {
+    await upsertUserAndLink(data.mobile, true, data.ownerName ?? null)
   }
 
   // Update society's totalFlats

@@ -71,3 +71,21 @@ export default defineConfig([
   },
 ])
 ```
+
+Explain
+The full flow when user visits /acme
+1. User types in browser:    http://localhost:5173/acme
+                                 ↓
+2. React Router sees URL:    /acme
+                                 ↓
+3. Router matches route:     /:slug   →   <SuperAdminLogin />
+                                 ↓
+4. Component mounts and runs:  useParams() → slug = "acme"
+                                 ↓
+5. Component fires API call:   GET http://localhost:8787/public/branding/acme
+                                 ↓
+6. API queries database:       SELECT * FROM super_admins WHERE slug='acme'
+                                 ↓
+7. API returns response:       { superAdmin: { name: "Acme...", ... } }
+                                 ↓
+8. Component renders branded login page

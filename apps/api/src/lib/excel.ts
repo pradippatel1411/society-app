@@ -6,9 +6,8 @@ export type ExcelCommitteeRole = CommitteeRole
 export type ExcelMemberRow = {
   block: string
   flatNo: string
-  ownerName: string
-  mobile1: string
-  mobile2: string | null
+  ownerName: string | null
+  mobile: string | null
   type: 'Owner' | 'Tenant'
   committeeRole: ExcelCommitteeRole | null
   rowIndex: number
@@ -26,22 +25,25 @@ export type ExcelParseResult = {
   errors: ExcelParseError[]
 }
 
-// Required column header names (case-insensitive)
-const REQUIRED_HEADERS = [
-  'block',
-  'flat no',
-  'owner name',
-  'mobile 1',
-  'type',
-] as const
+// Required column headers (case-insensitive). Block + Flat No are the
+// minimum identifying info; everything else can be filled later.
+const REQUIRED_HEADERS = ['block', 'flat no'] as const
 
 /**
  * Parses uploaded Excel buffer into structured member rows + per-row errors.
  *
  * Expected columns (header row, case-insensitive):
- *   Block | Flat No | Owner Name | Mobile 1 | Mobile 2 | Type | Role
+ *   Block | Flat No | Owner Name | Mobile | Type | Role
  *
- * Mobile 2 and Role are optional.
+ * Required: Block, Flat No.
+ * Optional: Owner Name, Mobile, Type (defaults to Owner), Role.
+ *
+ * One row = one flat. Each flat has at most one mobile in Excel (the
+ * primary contact). Additional members for a flat are added later through
+ * the "Add Member to Flat" UI action.
+ *
+ * Vacant flats can be onboarded with just Block + Flat No filled. The
+ * chairman/secretary can later attach a member via the UI.
  */
 export function parseExcel(buffer: ArrayBuffer): ExcelParseResult {
   const result: ExcelParseResult = { rows: [], errors: [] }
@@ -75,7 +77,7 @@ export function parseExcel(buffer: ArrayBuffer): ExcelParseResult {
     return result
   }
 
-  // Normalize header keys for the first row to validate
+  // Validate required headers
   const firstRow = rawRows[0]
   const normalizedHeaders = Object.keys(firstRow).map((h) =>
     h.toLowerCase().trim()
@@ -93,11 +95,19 @@ export function parseExcel(buffer: ArrayBuffer): ExcelParseResult {
   }
   if (result.errors.length > 0) return result
 
-  // Helper to fetch a cell value by header (case-insensitive)
-  const getCell = (row: Record<string, unknown>, header: string): string => {
-    for (const key of Object.keys(row)) {
-      if (key.toLowerCase().trim() === header) {
-        return String(row[key] ?? '').trim()
+  // Helper to fetch a cell value by header (case-insensitive).
+  // Accepts both "Mobile" and "Mobile 1" for the mobile column to ease
+  // backward compatibility with older Excel templates.
+  const getCell = (
+    row: Record<string, unknown>,
+    ...headers: string[]
+  ): string => {
+    for (const target of headers) {
+      for (const key of Object.keys(row)) {
+        if (key.toLowerCase().trim() === target) {
+          const value = String(row[key] ?? '').trim()
+          if (value) return value
+        }
       }
     }
     return ''
@@ -109,16 +119,17 @@ export function parseExcel(buffer: ArrayBuffer): ExcelParseResult {
     const block = getCell(row, 'block').toUpperCase()
     const flatNo = getCell(row, 'flat no')
     const ownerName = getCell(row, 'owner name')
-    const mobile1 = getCell(row, 'mobile 1').replace(/\s|-/g, '')
-    const mobile2Raw = getCell(row, 'mobile 2').replace(/\s|-/g, '')
+    // Accept "Mobile" or "Mobile 1" as the column name
+    const mobile = getCell(row, 'mobile', 'mobile 1').replace(/\s|-/g, '')
     const typeRaw = getCell(row, 'type').toLowerCase()
     const roleRaw = getCell(row, 'role').toLowerCase()
 
     // Skip completely empty rows
-    if (!block && !flatNo && !ownerName && !mobile1) return
+    if (!block && !flatNo && !ownerName && !mobile && !typeRaw) return
 
     let hasError = false
 
+    // Block — required
     if (!block) {
       result.errors.push({
         rowIndex: rowNumber,
@@ -137,6 +148,7 @@ export function parseExcel(buffer: ArrayBuffer): ExcelParseResult {
       hasError = true
     }
 
+    // Flat No — required
     if (!flatNo) {
       result.errors.push({
         rowIndex: rowNumber,
@@ -155,77 +167,36 @@ export function parseExcel(buffer: ArrayBuffer): ExcelParseResult {
       hasError = true
     }
 
-    if (!ownerName) {
+    // Owner Name — optional. No validation needed.
+
+    // Mobile — optional, but if provided must be 10 digits
+    if (mobile && !/^\d{10}$/.test(mobile)) {
       result.errors.push({
         rowIndex: rowNumber,
-        field: 'Owner Name',
-        value: ownerName,
-        message: 'Owner Name is required',
+        field: 'Mobile',
+        value: mobile,
+        message: 'Mobile must be exactly 10 digits',
       })
       hasError = true
     }
 
-    if (!mobile1) {
-      result.errors.push({
-        rowIndex: rowNumber,
-        field: 'Mobile 1',
-        value: mobile1,
-        message: 'Mobile 1 is required',
-      })
-      hasError = true
-    } else if (!/^\d{10}$/.test(mobile1)) {
-      result.errors.push({
-        rowIndex: rowNumber,
-        field: 'Mobile 1',
-        value: mobile1,
-        message: 'Mobile 1 must be exactly 10 digits',
-      })
-      hasError = true
+    // Type — optional, defaults to Owner. Must be Owner or Tenant if given.
+    let type: 'Owner' | 'Tenant' = 'Owner'
+    if (typeRaw) {
+      if (typeRaw === 'owner') type = 'Owner'
+      else if (typeRaw === 'tenant') type = 'Tenant'
+      else {
+        result.errors.push({
+          rowIndex: rowNumber,
+          field: 'Type',
+          value: typeRaw,
+          message: 'Type must be Owner or Tenant (or leave blank for Owner)',
+        })
+        hasError = true
+      }
     }
 
-    if (mobile2Raw && !/^\d{10}$/.test(mobile2Raw)) {
-      result.errors.push({
-        rowIndex: rowNumber,
-        field: 'Mobile 2',
-        value: mobile2Raw,
-        message: 'Mobile 2 must be exactly 10 digits if provided',
-      })
-      hasError = true
-    }
-
-    if (mobile2Raw && mobile1 === mobile2Raw) {
-      result.errors.push({
-        rowIndex: rowNumber,
-        field: 'Mobile 2',
-        value: mobile2Raw,
-        message: 'Mobile 1 and Mobile 2 cannot be the same',
-      })
-      hasError = true
-    }
-
-    // Type column
-    let type: 'Owner' | 'Tenant' | null = null
-    if (!typeRaw) {
-      result.errors.push({
-        rowIndex: rowNumber,
-        field: 'Type',
-        value: typeRaw,
-        message: 'Type is required (Owner / Tenant)',
-      })
-      hasError = true
-    } else if (typeRaw === 'owner') type = 'Owner'
-    else if (typeRaw === 'tenant') type = 'Tenant'
-    else {
-      result.errors.push({
-        rowIndex: rowNumber,
-        field: 'Type',
-        value: typeRaw,
-        message: 'Type must be Owner or Tenant',
-      })
-      hasError = true
-    }
-
-    // Role column (optional)
+    // Role — optional. Must be a valid committee role if given.
     let committeeRole: ExcelCommitteeRole | null = null
     if (roleRaw) {
       if (roleRaw === 'chairman') committeeRole = 'chairman'
@@ -245,13 +216,23 @@ export function parseExcel(buffer: ArrayBuffer): ExcelParseResult {
       }
     }
 
-    if (!hasError && type) {
+    // Cross-validation: role requires a mobile (no person, no role)
+    if (committeeRole && !mobile) {
+      result.errors.push({
+        rowIndex: rowNumber,
+        field: 'Role',
+        value: roleRaw,
+        message: 'Role requires Mobile — cannot assign role to a vacant flat',
+      })
+      hasError = true
+    }
+
+    if (!hasError) {
       result.rows.push({
         block,
         flatNo,
-        ownerName,
-        mobile1,
-        mobile2: mobile2Raw || null,
+        ownerName: ownerName || null,
+        mobile: mobile || null,
         type,
         committeeRole,
         rowIndex: rowNumber,

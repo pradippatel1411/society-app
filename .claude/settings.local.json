@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Projects\\\\society-app\" -Recurse -Force | Where-Object { $_.FullName -notmatch \"node_modules|\\\\.git|dist|build|\\\\.next|\\\\.turbo|\\\\.pnpm\" } | Select-Object -ExpandProperty FullName | Sort-Object | Select-Object -First 150)"
+    ]
+  }
+}
