@@ -1,12 +1,14 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { eq, and, desc } from 'drizzle-orm'
+import { eq, and, desc, inArray } from 'drizzle-orm'
 import { getDb } from '../db/client'
 import {
   superAdmins,
   societies,
   users,
   societyRoles,
+  flats,
+  flatMembers,
 } from '../db/schema'
 import { importMembersFromExcel } from '../lib/memberImport'
 import { requireAuth, requireUserType } from '../lib/middleware'
@@ -408,6 +410,65 @@ superAdmin.post('/societies/:id/upload-members', async (c) => {
   })
 
   return c.json(result, result.success ? 200 : 400)
+})
+
+// ────────────────────────────────────────────────────────────
+// GET /super-admin/societies/:id/members
+// View all flats with their members for a society
+// ────────────────────────────────────────────────────────────
+superAdmin.get('/societies/:id/members', async (c) => {
+  const superAdminId = getSuperAdminId(c)
+  if (!superAdminId) return c.json({ error: 'Forbidden' }, 403)
+  const societyId = parseInt(c.req.param('id'), 10)
+  if (isNaN(societyId)) return c.json({ error: 'Invalid society id' }, 400)
+
+  const db = getDb(c.env.DATABASE_URL)
+
+  // Verify the society belongs to this super admin
+  const [society] = await db
+    .select()
+    .from(societies)
+    .where(
+      and(eq(societies.id, societyId), eq(societies.superAdminId, superAdminId))
+    )
+    .limit(1)
+    
+  if (!society) return c.json({ error: 'Society not found' }, 404)
+
+  // Fetch all flats and their members
+  const allFlats = await db
+    .select()
+    .from(flats)
+    .where(eq(flats.societyId, societyId))
+
+  const flatIds = allFlats.map((f) => f.id)
+  const memberRows =
+    flatIds.length === 0
+      ? []
+      : await db
+          .select({
+            flatId: flatMembers.flatId,
+            userId: users.id,
+            name: users.name,
+            mobile: users.mobile,
+            relation: flatMembers.relation,
+            isPrimary: flatMembers.isPrimary,
+          })
+          .from(flatMembers)
+          .innerJoin(users, eq(flatMembers.userId, users.id))
+          .where(inArray(flatMembers.flatId, flatIds))
+
+  const flatsWithMembers = allFlats.map((flat) => ({
+    id: flat.id,
+    block: flat.block,
+    flatNo: flat.flatNo,
+    label: `${flat.block}-${flat.flatNo}`,
+    ownerName: flat.ownerName,
+    residencyType: flat.residencyType,
+    members: memberRows.filter((m) => m.flatId === flat.id),
+  }))
+
+  return c.json({ flats: flatsWithMembers })
 })
 
 export default superAdmin

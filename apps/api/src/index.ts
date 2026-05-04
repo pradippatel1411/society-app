@@ -19,7 +19,10 @@ type Bindings = {
 const app = new Hono<{ Bindings: Bindings }>()
 
 app.use('/*', cors({
-  origin: ['http://localhost:5173'],
+  origin: [
+    'http://localhost:5173',
+    'https://app.your-domain.com',  // production frontend
+  ],
   credentials: true,
 }))
 

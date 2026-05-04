@@ -1,19 +1,33 @@
-import './App.css'
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
+import { AuthProvider } from "./lib/auth"
+import OwnerLogin from "./pages/owner/OwnerLogin"
+import OwnerDashboard from "./pages/owner/OwnerDashboard"
+import SuperAdminLogin from "./pages/superadmin/SuperAdminLogin"
+import SuperAdminDashboard from "./pages/superadmin/SuperAdminDashboard"
+import SocietyDetail from "./pages/superadmin/SocietyDetail"
 
 function App() {
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-      <div className="bg-white p-8 rounded-2xl shadow-md">
-        <h1 className="text-3xl font-bold text-slate-800">
-          Society Maintenance
-        </h1>
-        <p className="text-slate-600 mt-2">
-          Setup is working — Tailwind CSS is active.
-        </p>
-      </div>
-    </div>
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          {/* Owner routes */}
+          <Route path="/owner" element={<OwnerLogin />} />
+          <Route path="/owner/dashboard" element={<OwnerDashboard />} />
+
+          {/* Super admin routes */}
+          <Route path="/:slug" element={<SuperAdminLogin />} />
+          <Route path="/:slug/dashboard" element={<SuperAdminDashboard />} />
+          <Route
+            path="/:slug/societies/:societySlug"
+            element={<SocietyDetail />}
+          />
+
+          <Route path="/" element={<Navigate to="/owner" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
   )
 }
-
 
 export default App
