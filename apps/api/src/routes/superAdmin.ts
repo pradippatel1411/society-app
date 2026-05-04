@@ -414,7 +414,9 @@ superAdmin.post('/societies/:id/upload-members', async (c) => {
 
 // ────────────────────────────────────────────────────────────
 // GET /super-admin/societies/:id/members
-// View all flats with their members for a society
+// View society + all flats with their members and roles.
+// Returns everything needed to render the chairman-style flat list and
+// member list views with client-side filtering.
 // ────────────────────────────────────────────────────────────
 superAdmin.get('/societies/:id/members', async (c) => {
   const superAdminId = getSuperAdminId(c)
@@ -432,16 +434,18 @@ superAdmin.get('/societies/:id/members', async (c) => {
       and(eq(societies.id, societyId), eq(societies.superAdminId, superAdminId))
     )
     .limit(1)
-    
+
   if (!society) return c.json({ error: 'Society not found' }, 404)
 
-  // Fetch all flats and their members
+  // Fetch all flats
   const allFlats = await db
     .select()
     .from(flats)
     .where(eq(flats.societyId, societyId))
 
   const flatIds = allFlats.map((f) => f.id)
+
+  // Fetch flat_members joined with users
   const memberRows =
     flatIds.length === 0
       ? []
@@ -458,6 +462,28 @@ superAdmin.get('/societies/:id/members', async (c) => {
           .innerJoin(users, eq(flatMembers.userId, users.id))
           .where(inArray(flatMembers.flatId, flatIds))
 
+  // Fetch society_roles for these users (within this society only)
+  const userIds = [...new Set(memberRows.map((m) => m.userId))]
+  const roleRows =
+    userIds.length === 0
+      ? []
+      : await db
+          .select({
+            userId: societyRoles.userId,
+            role: societyRoles.role,
+          })
+          .from(societyRoles)
+          .where(
+            and(
+              eq(societyRoles.societyId, societyId),
+              inArray(societyRoles.userId, userIds)
+            )
+          )
+
+  const roleMap = new Map<number, string>()
+  for (const r of roleRows) roleMap.set(r.userId, r.role)
+
+  // Build the flats response — members include their role
   const flatsWithMembers = allFlats.map((flat) => ({
     id: flat.id,
     block: flat.block,
@@ -465,10 +491,29 @@ superAdmin.get('/societies/:id/members', async (c) => {
     label: `${flat.block}-${flat.flatNo}`,
     ownerName: flat.ownerName,
     residencyType: flat.residencyType,
-    members: memberRows.filter((m) => m.flatId === flat.id),
+    members: memberRows
+      .filter((m) => m.flatId === flat.id)
+      .map((m) => ({
+        userId: m.userId,
+        name: m.name,
+        mobile: m.mobile,
+        relation: m.relation,
+        isPrimary: m.isPrimary,
+        role: roleMap.get(m.userId) ?? 'member',
+      })),
   }))
 
-  return c.json({ flats: flatsWithMembers })
+  return c.json({
+    society: {
+      id: society.id,
+      slug: society.slug,
+      name: society.name,
+      address: society.address,
+      totalFlats: society.totalFlats,
+      status: society.status,
+    },
+    flats: flatsWithMembers,
+  })
 })
 
 export default superAdmin
