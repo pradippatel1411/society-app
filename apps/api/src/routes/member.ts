@@ -8,6 +8,8 @@ import {
   flatPaymentTrack,
   payments,
   societies,
+  users,
+  societyRoles,
 } from '../db/schema'
 import { requireAuth, requireUserType } from '../lib/middleware'
 import {
@@ -277,6 +279,289 @@ member.get('/payments', async (c) => {
     .orderBy(desc(payments.paidAt))
 
   return c.json({ payments: rows })
+})
+
+// ────────────────────────────────────────────────────────────
+// GET /member/flat/:flatId
+// Returns flat details + members list for one of the user's flats.
+// Member must be linked to this flat.
+// ────────────────────────────────────────────────────────────
+member.get('/flat/:flatId', async (c) => {
+  const user = c.get('user')
+  const db = getDb(c.env.DATABASE_URL)
+  const flatId = parseInt(c.req.param('flatId'), 10)
+  if (isNaN(flatId)) return c.json({ error: 'Invalid flat id' }, 400)
+
+  // Verify the user is actually a member of this flat
+  const [link] = await db
+    .select()
+    .from(flatMembers)
+    .where(and(eq(flatMembers.flatId, flatId), eq(flatMembers.userId, user.userId)))
+    .limit(1)
+  if (!link) return c.json({ error: 'Flat not found or access denied' }, 403)
+
+  // Fetch flat details
+  const [flat] = await db
+    .select()
+    .from(flats)
+    .where(eq(flats.id, flatId))
+    .limit(1)
+  if (!flat) return c.json({ error: 'Flat not found' }, 404)
+
+  // Fetch all members of this flat with their society role
+  const memberRows = await db
+    .select({
+      userId: flatMembers.userId,
+      relation: flatMembers.relation,
+      isPrimary: flatMembers.isPrimary,
+      name: users.name,
+      mobile: users.mobile,
+    })
+    .from(flatMembers)
+    .innerJoin(users, eq(flatMembers.userId, users.id))
+    .where(eq(flatMembers.flatId, flatId))
+
+  // Fetch roles for those users in this society
+  const userIds = memberRows.map((m) => m.userId)
+  const roles =
+    userIds.length === 0
+      ? []
+      : await db
+          .select({ userId: societyRoles.userId, role: societyRoles.role })
+          .from(societyRoles)
+          .where(
+            and(
+              eq(societyRoles.societyId, flat.societyId),
+              inArray(societyRoles.userId, userIds),
+              eq(societyRoles.isActive, true)
+            )
+          )
+
+  const members = memberRows.map((m) => ({
+    userId: m.userId,
+    name: m.name,
+    mobile: m.mobile,
+    relation: m.relation,
+    isPrimary: m.isPrimary,
+    role: roles.find((r) => r.userId === m.userId)?.role ?? 'member',
+  }))
+
+  return c.json({
+    flat: {
+      id: flat.id,
+      block: flat.block,
+      flatNo: flat.flatNo,
+      label: `${flat.block}-${flat.flatNo}`,
+      ownerName: flat.ownerName,
+      residencyType: flat.residencyType,
+      societyId: flat.societyId,
+      members,
+    },
+  })
+})
+
+// ────────────────────────────────────────────────────────────
+// POST /member/pay
+// Member self-records a payment for their own flat.
+// Delegates to the same logic as committee payment recording
+// but restricted to the user's own flats.
+// Body: { masterId, flatId, frequency, amount, mode, gatewayTxnId? }
+// ────────────────────────────────────────────────────────────
+member.post('/pay', async (c) => {
+  const user = c.get('user')
+  const db = getDb(c.env.DATABASE_URL)
+
+  const body = await c.req.json().catch(() => null)
+  if (!body) return c.json({ error: 'Invalid request body' }, 400)
+
+  const { masterId, flatId, frequency, amount, mode, gatewayTxnId } = body as {
+    masterId: number
+    flatId: number
+    frequency: string
+    amount: number
+    mode: string
+    gatewayTxnId?: string | null
+  }
+
+  if (!masterId || !flatId || !frequency || !amount || !mode) {
+    return c.json({ error: 'Missing required fields: masterId, flatId, frequency, amount, mode' }, 400)
+  }
+
+  const validFrequencies = ['monthly', 'quarterly', 'half_yearly', 'yearly']
+  const validModes = ['upi', 'cash', 'cheque', 'manual']
+  if (!validFrequencies.includes(frequency)) {
+    return c.json({ error: `Invalid frequency. Must be one of: ${validFrequencies.join(', ')}` }, 400)
+  }
+  if (!validModes.includes(mode)) {
+    return c.json({ error: `Invalid mode. Must be one of: ${validModes.join(', ')}` }, 400)
+  }
+  if (!Number.isInteger(amount) || amount <= 0) {
+    return c.json({ error: 'Amount must be a positive integer' }, 400)
+  }
+
+  // Verify user is linked to this flat
+  const [link] = await db
+    .select()
+    .from(flatMembers)
+    .where(and(eq(flatMembers.flatId, flatId), eq(flatMembers.userId, user.userId)))
+    .limit(1)
+  if (!link) return c.json({ error: 'You are not a member of this flat' }, 403)
+
+  // Load flat
+  const [flat] = await db
+    .select()
+    .from(flats)
+    .where(eq(flats.id, flatId))
+    .limit(1)
+  if (!flat) return c.json({ error: 'Flat not found' }, 404)
+
+  // Load master
+  const [master] = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(
+      and(
+        eq(maintenanceMaster.id, masterId),
+        eq(maintenanceMaster.societyId, flat.societyId)
+      )
+    )
+    .limit(1)
+  if (!master) return c.json({ error: 'Maintenance master not found' }, 404)
+  if (master.status !== 'active') {
+    return c.json({ error: 'This financial year is closed' }, 400)
+  }
+
+  // Get the per-cycle amount for this flat's residency + chosen frequency
+  const freq = frequency as MaintenanceFrequency
+  const freqAmount = pickAmount(master, flat.residencyType, freq)
+  if (freqAmount == null) {
+    return c.json(
+      { error: `Frequency "${frequency}" is not enabled for ${flat.residencyType}s in this FY` },
+      400
+    )
+  }
+
+  // Amount must be a positive multiple of freqAmount
+  if (amount % freqAmount !== 0) {
+    return c.json(
+      {
+        error: `Amount must be a multiple of ₹${freqAmount} (the ${frequency} amount for ${flat.residencyType}s)`,
+      },
+      400
+    )
+  }
+
+  // Get or create the flat_payment_track row
+  const [existingTrack] = await db
+    .select()
+    .from(flatPaymentTrack)
+    .where(
+      and(
+        eq(flatPaymentTrack.maintenanceMasterId, masterId),
+        eq(flatPaymentTrack.flatId, flatId)
+      )
+    )
+    .limit(1)
+
+  let trackId: number
+  let lockedFrequency: MaintenanceFrequency
+  let totalAmount: number
+  let currentPaid: number
+
+  if (!existingTrack) {
+    const cycles = FREQUENCY_CYCLES[freq]
+    totalAmount = freqAmount * cycles
+    const [created] = await db
+      .insert(flatPaymentTrack)
+      .values({
+        maintenanceMasterId: masterId,
+        flatId,
+        frequency: freq,
+        totalAmount,
+        paidAmount: 0,
+        status: 'unpaid',
+      })
+      .returning()
+    trackId = created.id
+    lockedFrequency = freq
+    currentPaid = 0
+  } else {
+    if (existingTrack.status === 'paid') {
+      return c.json({ error: 'This flat is already fully paid for this FY' }, 400)
+    }
+    if (existingTrack.frequency === null) {
+      // First payment — lock the frequency
+      const cycles = FREQUENCY_CYCLES[freq]
+      totalAmount = freqAmount * cycles
+      lockedFrequency = freq
+      await db
+        .update(flatPaymentTrack)
+        .set({ frequency: freq, totalAmount, updatedAt: new Date() })
+        .where(eq(flatPaymentTrack.id, existingTrack.id))
+      trackId = existingTrack.id
+      currentPaid = existingTrack.paidAmount
+    } else {
+      if (existingTrack.frequency !== freq) {
+        return c.json(
+          {
+            error: `Your payment frequency is locked to "${existingTrack.frequency}" for this FY. You cannot change it.`,
+          },
+          400
+        )
+      }
+      lockedFrequency = existingTrack.frequency
+      totalAmount =
+        existingTrack.totalAmount ?? freqAmount * FREQUENCY_CYCLES[lockedFrequency]
+      trackId = existingTrack.id
+      currentPaid = existingTrack.paidAmount
+    }
+  }
+
+  const outstanding = totalAmount - currentPaid
+  if (amount > outstanding) {
+    return c.json(
+      { error: `Cannot pay ₹${amount}. Only ₹${outstanding} is outstanding for this FY.` },
+      400
+    )
+  }
+
+  // Insert the payment row
+  const [payment] = await db
+    .insert(payments)
+    .values({
+      maintenanceMasterId: masterId,
+      flatId,
+      paidByUserId: user.userId,
+      frequency: lockedFrequency,
+      amount,
+      mode: mode as 'upi' | 'cash' | 'cheque' | 'manual',
+      gateway: null,
+      gatewayTxnId: gatewayTxnId ?? null,
+      status: 'success',
+      notes: null,
+    })
+    .returning()
+
+  // Update the track
+  const newPaid = currentPaid + amount
+  const newStatus = newPaid >= totalAmount ? 'paid' : 'unpaid'
+  await db
+    .update(flatPaymentTrack)
+    .set({ paidAmount: newPaid, status: newStatus, updatedAt: new Date() })
+    .where(eq(flatPaymentTrack.id, trackId))
+
+  return c.json({
+    success: true,
+    payment,
+    track: {
+      id: trackId,
+      frequency: lockedFrequency,
+      totalAmount,
+      paidAmount: newPaid,
+      status: newStatus,
+      outstanding: totalAmount - newPaid,
+    },
+  })
 })
 
 export default member

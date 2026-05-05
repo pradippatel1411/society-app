@@ -17,7 +17,7 @@ type Branding = {
 
 const COMMITTEE_ROLES = ["chairman", "secretary", "cashier", "committee"]
 
-export default function SocietyAdminLogin() {
+export default function SocietyLogin() {
   const navigate = useNavigate()
   const { slug, societySlug } = useParams<{
     slug: string
@@ -35,36 +35,29 @@ export default function SocietyAdminLogin() {
   const [resendCooldown, setResendCooldown] = useState(0)
   const [devOtpHint, setDevOtpHint] = useState<string | null>(null)
 
-  // If already logged in as a committee member of any society, redirect into
-  // the dashboard. The layout will do per-society verification and reject if
-  // they don't have a committee role specifically in this society.
+  // If already logged in, redirect to the right dashboard based on role
   useEffect(() => {
     if (!isAuthenticated || user?.userType !== "society_user") return
     if (!slug || !societySlug || !branding) return
 
-    const hasAnyCommittee = (user.societyRoles ?? []).some((r) =>
+    const hasCommittee = (user.societyRoles ?? []).some((r) =>
       COMMITTEE_ROLES.includes(r.role)
     )
-    if (hasAnyCommittee) {
-      navigate(`/${slug}/societies/${societySlug}/admin/dashboard`, {
-        replace: true,
-      })
+    if (hasCommittee) {
+      navigate(`/${slug}/societies/${societySlug}/admin/dashboard`, { replace: true })
+    } else {
+      navigate(`/${slug}/societies/${societySlug}/dashboard`, { replace: true })
     }
   }, [isAuthenticated, user, slug, societySlug, branding, navigate])
 
-  // Load branding (super admin + society info)
+  // Load branding
   useEffect(() => {
     if (!slug || !societySlug) return
     let cancelled = false
-
     ;(async () => {
       try {
         const res = await api<{
-          superAdmin: {
-            name: string
-            brandColor: string
-            logoUrl: string | null
-          }
+          superAdmin: { name: string; brandColor: string; logoUrl: string | null }
           society: { name: string }
         }>(`/public/branding/${slug}/${societySlug}`)
         if (!cancelled) {
@@ -80,10 +73,7 @@ export default function SocietyAdminLogin() {
         if (!cancelled) setBrandingLoading(false)
       }
     })()
-
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [slug, societySlug])
 
   // Cooldown timer
@@ -108,11 +98,7 @@ export default function SocietyAdminLogin() {
         devMode: boolean
       }>("/auth/sendOTP", {
         method: "POST",
-        body: {
-          mobile,
-          scope: "society",
-          scopeRef: `${slug}/${societySlug}`,
-        },
+        body: { mobile, scope: "society", scopeRef: `${slug}/${societySlug}` },
       })
       setStep("otp")
       setResendCooldown(res.nextResendAfterSeconds)
@@ -145,12 +131,7 @@ export default function SocietyAdminLogin() {
           superAdminId: number | null
           societyRoles?: Array<{
             societyId: number
-            role:
-              | "chairman"
-              | "secretary"
-              | "cashier"
-              | "committee"
-              | "member"
+            role: "chairman" | "secretary" | "cashier" | "committee" | "member"
           }>
         }
       }>("/auth/verifyOTP", {
@@ -158,22 +139,25 @@ export default function SocietyAdminLogin() {
         body: { mobile, otp, scope: "society" },
       })
 
-      // Check that the user has a committee role
-      const isCommittee = (res.user.societyRoles ?? []).some((r) =>
-        COMMITTEE_ROLES.includes(r.role)
-      )
-      if (!isCommittee) {
-        setError(
-          "You don't have admin access to this society. Plain members use the member portal instead."
-        )
+      // Verify user belongs to this society at all — the layout will do deeper checks
+      const hasSocietyRole = (res.user.societyRoles ?? []).length > 0
+      if (!hasSocietyRole) {
+        setError("You are not a member of this society. Contact your administrator.")
         setLoading(false)
         return
       }
 
       login(res.token, res.user)
-      navigate(`/${slug}/societies/${societySlug}/admin/dashboard`, {
-        replace: true,
-      })
+
+      // Route to committee admin or member dashboard
+      const isCommittee = (res.user.societyRoles ?? []).some((r) =>
+        COMMITTEE_ROLES.includes(r.role)
+      )
+      if (isCommittee) {
+        navigate(`/${slug}/societies/${societySlug}/admin/dashboard`, { replace: true })
+      } else {
+        navigate(`/${slug}/societies/${societySlug}/dashboard`, { replace: true })
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Verification failed")
     } finally {
@@ -195,9 +179,7 @@ export default function SocietyAdminLogin() {
         <Card className="max-w-md w-full">
           <CardBody className="text-center py-12">
             <div className="text-4xl mb-3">🔒</div>
-            <h1 className="font-serif text-2xl text-ink mb-2">
-              Society not found
-            </h1>
+            <h1 className="font-serif text-2xl text-ink mb-2">Society not found</h1>
             <p className="text-sm text-ink-muted">
               The link is invalid. Check with your administrator.
             </p>
@@ -213,15 +195,11 @@ export default function SocietyAdminLogin() {
     <div className="min-h-screen flex items-center justify-center px-4 py-12 bg-cream relative overflow-hidden">
       <div
         className="absolute -top-40 -right-40 w-[500px] h-[500px] rounded-full opacity-30 blur-3xl"
-        style={{
-          background: `radial-gradient(circle at center, ${accent}40, transparent 70%)`,
-        }}
+        style={{ background: `radial-gradient(circle at center, ${accent}40, transparent 70%)` }}
       />
       <div
         className="absolute -bottom-40 -left-40 w-[500px] h-[500px] rounded-full opacity-15 blur-3xl"
-        style={{
-          background: `radial-gradient(circle at center, ${accent}30, transparent 70%)`,
-        }}
+        style={{ background: `radial-gradient(circle at center, ${accent}30, transparent 70%)` }}
       />
 
       <div className="relative w-full max-w-md animate-slide-up">
@@ -233,14 +211,12 @@ export default function SocietyAdminLogin() {
             🏢
           </div>
           <p className="text-xs font-medium text-ink-muted uppercase tracking-widest mb-1">
-            Society Admin · {branding.superAdminName}
+            {branding.superAdminName}
           </p>
-          <h1 className="font-serif text-3xl text-ink">
-            {branding.societyName}
-          </h1>
+          <h1 className="font-serif text-3xl text-ink">{branding.societyName}</h1>
           <p className="text-ink-muted text-sm mt-2">
             {step === "mobile"
-              ? "Sign in as chairman, secretary, cashier, or committee"
+              ? "Sign in with your registered mobile number"
               : `Code sent to +91 ${mobile}`}
           </p>
         </div>
@@ -280,9 +256,7 @@ export default function SocietyAdminLogin() {
                   </label>
                   <OtpInput value={otp} onChange={setOtp} disabled={loading} />
                   {error && (
-                    <p className="mt-3 text-xs text-red-600 text-center">
-                      {error}
-                    </p>
+                    <p className="mt-3 text-xs text-red-600 text-center">{error}</p>
                   )}
                   {devOtpHint && (
                     <p className="mt-3 text-xs text-rust text-center font-medium">
@@ -318,11 +292,7 @@ export default function SocietyAdminLogin() {
                   )}
                   <button
                     type="button"
-                    onClick={() => {
-                      setStep("mobile")
-                      setError(null)
-                      setOtp("")
-                    }}
+                    onClick={() => { setStep("mobile"); setError(null); setOtp("") }}
                     className="block w-full mt-3 text-xs text-ink-muted hover:text-ink"
                   >
                     Use a different mobile number
