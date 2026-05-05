@@ -66,7 +66,7 @@ export default function MemberLayout() {
   useEffect(() => {
     if (isLoading) return
     if (!isAuthenticated || user?.userType !== "society_user") {
-      navigate(`/${slug}/societies/${societySlug}`, { replace: true })
+      navigate(`/${slug}/societies/${societySlug}/login`, { replace: true })
       return
     }
     // Committee members belong in the admin dashboard
@@ -127,7 +127,7 @@ export default function MemberLayout() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         logout()
-        navigate(`/${slug}/societies/${societySlug}`, { replace: true })
+        navigate(`/${slug}`, { replace: true, state: { loggedOut: true, loginUrl: `${window.location.origin}/${slug}/societies/${societySlug}/login` } })
         return
       }
       setError(err instanceof Error ? err.message : "Failed to load")
@@ -188,7 +188,7 @@ export default function MemberLayout() {
         if (cancelled) return
         if (err instanceof ApiError && err.status === 401) {
           logout()
-          navigate(`/${slug}/societies/${societySlug}`, { replace: true })
+          navigate(`/${slug}`, { replace: true, state: { loggedOut: true, loginUrl: `${window.location.origin}/${slug}/societies/${societySlug}/login` } })
           return
         }
         setError(err instanceof Error ? err.message : "Failed to load")
@@ -222,7 +222,7 @@ export default function MemberLayout() {
               size="sm"
               onClick={() => {
                 logout()
-                navigate(`/${slug}/societies/${societySlug}`)
+                navigate(`/${slug}`, { state: { loggedOut: true, loginUrl: `${window.location.origin}/${slug}/societies/${societySlug}/login` } })
               }}
             >
               Sign out
@@ -264,7 +264,7 @@ export default function MemberLayout() {
             size="sm"
             onClick={() => {
               logout()
-              navigate(`/${slug}/societies/${societySlug}`)
+              navigate(`/${slug}`, { state: { loggedOut: true, loginUrl: `${window.location.origin}/${slug}/societies/${societySlug}/login` } })
             }}
           >
             Sign out

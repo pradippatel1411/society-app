@@ -109,7 +109,10 @@ export default function SocietyAdminLayout() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         logout()
-        navigate(`/${slug}/societies/${societySlug}/admin`, { replace: true })
+        navigate(`/${slug}/societies/${societySlug}/admin`, {
+          replace: true,
+          state: { loggedOut: true, loginUrl: `${window.location.origin}/${slug}/societies/${societySlug}/login` },
+        })
         return
       }
       setError(err instanceof Error ? err.message : "Failed to load")
@@ -166,6 +169,7 @@ export default function SocietyAdminLayout() {
           logout()
           navigate(`/${slug}/societies/${societySlug}/admin`, {
             replace: true,
+            state: { loggedOut: true, loginUrl: `${window.location.origin}/${slug}/societies/${societySlug}/login` },
           })
           return
         }
@@ -202,7 +206,9 @@ export default function SocietyAdminLayout() {
               size="sm"
               onClick={() => {
                 logout()
-                navigate(`/${slug}/societies/${societySlug}/admin`)
+                navigate(`/${slug}/societies/${societySlug}/admin`, {
+                  state: { loggedOut: true, loginUrl: `${window.location.origin}/${slug}/societies/${societySlug}/login` },
+                })
               }}
             >
               Sign out
@@ -249,7 +255,9 @@ export default function SocietyAdminLayout() {
             size="sm"
             onClick={() => {
               logout()
-              navigate(`/${slug}/societies/${societySlug}/admin`)
+              navigate(`/${slug}/societies/${societySlug}/admin`, {
+                state: { loggedOut: true, loginUrl: `${window.location.origin}/${slug}/societies/${societySlug}/login` },
+              })
             }}
           >
             Sign out

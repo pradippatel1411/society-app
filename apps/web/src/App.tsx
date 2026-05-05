@@ -45,14 +45,19 @@ function App() {
             <Route path="members" element={<SocietyMembers />} />
           </Route>
 
-          {/* ── Society unified login ────────────────────────── */}
+          {/* ── Society login / logout landing ───────────────── */}
           {/*
-            Single URL for all society users.
+            /login  — canonical login URL shared with all society users
+            /admin  — admin logout lands here; same login form + "signed out" notice
             After OTP verify → committee goes to /admin/dashboard
                              → members go to /dashboard
           */}
           <Route
             path="/:slug/societies/:societySlug/login"
+            element={<SocietyAdminLogin />}
+          />
+          <Route
+            path="/:slug/societies/:societySlug/admin"
             element={<SocietyAdminLogin />}
           />
 
