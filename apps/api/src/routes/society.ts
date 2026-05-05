@@ -213,6 +213,23 @@ society.get('/:id/members', async (c) => {
 
   const db = getDb(c.env.DATABASE_URL)
 
+  // Fetch society info — required by the frontend layout
+  const [societyRow] = await db
+    .select()
+    .from(societies)
+    .where(eq(societies.id, societyId))
+    .limit(1)
+  if (!societyRow) return c.json({ error: 'Society not found' }, 404)
+
+  const societyInfo = {
+    id: societyRow.id,
+    slug: societyRow.slug,
+    name: societyRow.name,
+    address: societyRow.address,
+    totalFlats: societyRow.totalFlats,
+    status: societyRow.status,
+  }
+
   const flatList = await db
     .select()
     .from(flats)
@@ -227,7 +244,7 @@ society.get('/:id/members', async (c) => {
   // Fetch members for each flat
   const flatIds = flatList.map((f) => f.id)
   if (flatIds.length === 0) {
-    return c.json({ flats: [] })
+    return c.json({ society: societyInfo, flats: [] })
   }
 
   const memberships = await db
@@ -261,7 +278,7 @@ society.get('/:id/members', async (c) => {
       })),
   }))
 
-  return c.json({ flats: result })
+  return c.json({ society: societyInfo, flats: result })
 })
 
 // ────────────────────────────────────────────────────────────
@@ -557,7 +574,7 @@ const addMemberSchema = z.object({
 })
 
 society.post('/:id/flats/:flatId/members', async (c) => {
-  const societyId = getAuthorizedSocietyId(c, ['chairman', 'secretary'])
+  const societyId = getAuthorizedSocietyId(c, ['chairman', 'secretary', 'cashier'])
   if (!societyId) return c.json({ error: 'Forbidden' }, 403)
 
   const flatId = parseInt(c.req.param('flatId'), 10)
@@ -589,18 +606,6 @@ society.post('/:id/flats/:flatId/members', async (c) => {
     .where(eq(societies.id, societyId))
     .limit(1)
   if (!societyRow) return c.json({ error: 'Society not found' }, 404)
-
-  // Limit to 2 members per flat
-  const existingMembers = await db
-    .select()
-    .from(flatMembers)
-    .where(eq(flatMembers.flatId, flatId))
-  if (existingMembers.length >= 2) {
-    return c.json(
-      { error: 'This flat already has 2 members (the maximum allowed)' },
-      409
-    )
-  }
 
   // Find or create user
   const [existingUser] = await db
@@ -674,7 +679,7 @@ society.post('/:id/flats/:flatId/members', async (c) => {
 // Remove a member from a flat (does NOT delete the user globally)
 // ────────────────────────────────────────────────────────────
 society.delete('/:id/flats/:flatId/members/:userId', async (c) => {
-  const societyId = getAuthorizedSocietyId(c, ['chairman', 'secretary'])
+  const societyId = getAuthorizedSocietyId(c, ['chairman', 'secretary', 'cashier'])
   if (!societyId) return c.json({ error: 'Forbidden' }, 403)
 
   const flatId = parseInt(c.req.param('flatId'), 10)
@@ -1022,10 +1027,15 @@ const createMasterSchema = z
   )
 
 society.post('/:id/maintenance-master', async (c) => {
-  const societyId = getAuthorizedSocietyId(c, ['chairman', 'secretary'])
+  const societyId = getAuthorizedSocietyId(c, [
+    'chairman',
+    'secretary',
+    'cashier',
+    'committee',
+  ])
   if (!societyId) {
     return c.json(
-      { error: 'Forbidden — chairman/secretary access required' },
+      { error: 'Forbidden — committee access required' },
       403
     )
   }
