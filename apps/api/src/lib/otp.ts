@@ -52,20 +52,24 @@ export async function createOtp(
  */
 export async function findActiveOtp(
   db: Database,
-  params: { mobile: string; scope: string }
+  params: { mobile: string; scope: string; scopeRef?: string | null }
 ) {
   const now = new Date()
+  const filters = [
+    eq(otps.mobile, params.mobile),
+    eq(otps.scope, params.scope),
+    eq(otps.isUsed, false),
+    gt(otps.expiresAt, now),
+  ]
+
+  if (params.scopeRef) {
+    filters.push(eq(otps.scopeRef, params.scopeRef))
+  }
+
   const rows = await db
     .select()
     .from(otps)
-    .where(
-      and(
-        eq(otps.mobile, params.mobile),
-        eq(otps.scope, params.scope),
-        eq(otps.isUsed, false),
-        gt(otps.expiresAt, now)
-      )
-    )
+    .where(and(...filters))
     .orderBy(desc(otps.createdAt))
     .limit(1)
   return rows[0] ?? null

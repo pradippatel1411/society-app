@@ -215,6 +215,7 @@ const verifyOtpSchema = z.object({
   mobile: z.string().regex(/^\d{10}$/),
   otp: z.string().regex(/^\d{6}$/),
   scope: z.enum(['owner', 'super_admin', 'society']),
+  scopeRef: z.string().optional(),
 })
 
 auth.post('/verifyOTP', async (c) => {
@@ -224,10 +225,21 @@ auth.post('/verifyOTP', async (c) => {
     return c.json({ error: 'Invalid input', details: parsed.error.flatten() }, 400)
   }
 
-  const { mobile, otp, scope } = parsed.data
+  const { mobile, otp, scope, scopeRef } = parsed.data
   const db = getDb(c.env.DATABASE_URL)
 
-  const activeOtp = await findActiveOtp(db, { mobile, scope })
+  if (scope === 'super_admin' && !scopeRef) {
+    return c.json({ error: 'scopeRef (super admin slug) is required' }, 400)
+  }
+
+  if (scope === 'society' && (!scopeRef || !scopeRef.includes('/'))) {
+    return c.json(
+      { error: 'scopeRef must be in format "superAdminSlug/societySlug"' },
+      400
+    )
+  }
+
+  const activeOtp = await findActiveOtp(db, { mobile, scope, scopeRef })
   if (!activeOtp) {
     return c.json({ error: 'No active OTP found. Please request a new one.' }, 404)
   }
@@ -251,6 +263,31 @@ auth.post('/verifyOTP', async (c) => {
   const [user] = await db.select().from(users).where(eq(users.mobile, mobile)).limit(1)
   if (!user) {
     return c.json({ error: 'User not found.' }, 404)
+  }
+
+  let tokenSocietyId: number | null = null
+
+  if (scope === 'society' && scopeRef) {
+    const [saSlug, socSlug] = scopeRef.split('/')
+    const [society] = await db
+      .select({ id: societies.id })
+      .from(societies)
+      .innerJoin(superAdmins, eq(societies.superAdminId, superAdmins.id))
+      .where(
+        and(
+          eq(superAdmins.slug, saSlug),
+          eq(societies.slug, socSlug),
+          eq(superAdmins.status, 'active'),
+          eq(societies.status, 'active')
+        )
+      )
+      .limit(1)
+
+    if (!society) {
+      return c.json({ error: 'Society not found or inactive' }, 404)
+    }
+
+    tokenSocietyId = society.id
   }
 
   // For society_user, fetch their roles to embed in JWT
@@ -282,6 +319,7 @@ auth.post('/verifyOTP', async (c) => {
       mobile: user.mobile,
       userType: user.userType,
       superAdminId: user.superAdminId,
+      societyId: tokenSocietyId,
       societyRoles: societyRoleEntries,
     },
     c.env.JWT_SECRET
@@ -296,6 +334,7 @@ auth.post('/verifyOTP', async (c) => {
     name: user.name,
     userType: user.userType,
     superAdminId: user.superAdminId,
+    societyId: tokenSocietyId,
     societyRoles: societyRoleEntries,
   },
 })

@@ -27,6 +27,7 @@ type Variables = {
     userId: number
     mobile: string
     userType: 'product_owner' | 'super_admin' | 'society_user'
+    societyId?: number | null
   }
 }
 
@@ -73,6 +74,10 @@ member.get('/dues', async (c) => {
   const user = c.get('user')
   const db = getDb(c.env.DATABASE_URL)
 
+  if (!user.societyId) {
+    return c.json({ error: 'Society context missing from token' }, 401)
+  }
+
   // Find this user's flats with society info
   const myFlats = await db
     .select({
@@ -86,7 +91,12 @@ member.get('/dues', async (c) => {
     .from(flatMembers)
     .innerJoin(flats, eq(flatMembers.flatId, flats.id))
     .innerJoin(societies, eq(flats.societyId, societies.id))
-    .where(eq(flatMembers.userId, user.userId))
+    .where(
+      and(
+        eq(flatMembers.userId, user.userId),
+        eq(flats.societyId, user.societyId)
+      )
+    )
 
   if (myFlats.length === 0) {
     return c.json({ dues: [] })
@@ -245,10 +255,20 @@ member.get('/payments', async (c) => {
   const user = c.get('user')
   const db = getDb(c.env.DATABASE_URL)
 
+  if (!user.societyId) {
+    return c.json({ error: 'Society context missing from token' }, 401)
+  }
+
   const myFlatRows = await db
     .select({ flatId: flatMembers.flatId })
     .from(flatMembers)
-    .where(eq(flatMembers.userId, user.userId))
+    .innerJoin(flats, eq(flatMembers.flatId, flats.id))
+    .where(
+      and(
+        eq(flatMembers.userId, user.userId),
+        eq(flats.societyId, user.societyId)
+      )
+    )
   if (myFlatRows.length === 0) return c.json({ payments: [] })
   const flatIds = myFlatRows.map((r) => r.flatId)
 

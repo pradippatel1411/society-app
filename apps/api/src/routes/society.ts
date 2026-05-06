@@ -1433,6 +1433,161 @@ society.post('/:id/maintenance-master/:masterId/payments', async (c) => {
   })
 })
 
+// ────────────────────────────────────────────────────────────
+// GET /society/:id/flats/:flatId/dues
+// Returns all maintenance dues for a specific flat (admin subgrid)
+// ────────────────────────────────────────────────────────────
+society.get('/:id/flats/:flatId/dues', async (c) => {
+  const societyId = getAuthorizedSocietyId(c)
+  if (!societyId) return c.json({ error: 'Forbidden' }, 403)
+
+  const flatId = parseInt(c.req.param('flatId'), 10)
+  if (isNaN(flatId)) return c.json({ error: 'Invalid flat id' }, 400)
+
+  const db = getDb(c.env.DATABASE_URL)
+
+  // Verify flat belongs to this society
+  const [flat] = await db
+    .select()
+    .from(flats)
+    .where(and(eq(flats.id, flatId), eq(flats.societyId, societyId)))
+    .limit(1)
+  if (!flat) return c.json({ error: 'Flat not found' }, 404)
+
+  const allMasters = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(eq(maintenanceMaster.societyId, societyId))
+    .orderBy(desc(maintenanceMaster.fyStartDate))
+
+  if (allMasters.length === 0) return c.json({ dues: [] })
+
+  const masterIds = allMasters.map((m) => m.id)
+  const tracks = await db
+    .select()
+    .from(flatPaymentTrack)
+    .where(
+      and(
+        eq(flatPaymentTrack.flatId, flatId),
+        inArray(flatPaymentTrack.maintenanceMasterId, masterIds)
+      )
+    )
+
+  const result = []
+  for (const master of allMasters) {
+    const track = tracks.find((t) => t.maintenanceMasterId === master.id)
+    const allFreqs: MaintenanceFrequency[] = ['monthly', 'quarterly', 'half_yearly', 'yearly']
+    const availableOptions = allFreqs
+      .map((freq) => {
+        const amount = pickFrequencyAmount(master, flat.residencyType as 'owner' | 'tenant', freq)
+        if (amount == null) return null
+        return {
+          frequency: freq,
+          amountPerCycle: amount,
+          cyclesPerYear: FREQUENCY_CYCLES[freq],
+          fyTotalIfChosen: amount * FREQUENCY_CYCLES[freq],
+        }
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null)
+
+    if (!track) {
+      result.push({
+        masterId: master.id,
+        fyLabel: master.fyLabel,
+        fyStartDate: master.fyStartDate,
+        fyEndDate: master.fyEndDate,
+        frequencyLocked: false,
+        frequency: null,
+        totalAmount: null,
+        paidAmount: 0,
+        outstanding: null,
+        status: 'unpaid',
+        availableFrequencies: availableOptions,
+      })
+      continue
+    }
+
+    if (track.frequency === null) {
+      result.push({
+        masterId: master.id,
+        fyLabel: master.fyLabel,
+        fyStartDate: master.fyStartDate,
+        fyEndDate: master.fyEndDate,
+        frequencyLocked: false,
+        frequency: null,
+        totalAmount: null,
+        paidAmount: track.paidAmount,
+        outstanding: null,
+        status: track.status,
+        availableFrequencies: availableOptions,
+      })
+      continue
+    }
+
+    const lockedAmount = pickFrequencyAmount(master, flat.residencyType as 'owner' | 'tenant', track.frequency)
+    const totalAmount = track.totalAmount ?? 0
+    const outstanding = totalAmount - track.paidAmount
+
+    result.push({
+      masterId: master.id,
+      fyLabel: master.fyLabel,
+      fyStartDate: master.fyStartDate,
+      fyEndDate: master.fyEndDate,
+      frequencyLocked: true,
+      frequency: track.frequency,
+      amountPerCycle: lockedAmount,
+      totalAmount,
+      paidAmount: track.paidAmount,
+      outstanding,
+      status: track.status,
+    })
+  }
+
+  return c.json({ dues: result })
+})
+
+// ────────────────────────────────────────────────────────────
+// GET /society/:id/flats/:flatId/payments
+// Returns full payment history for a specific flat (admin subgrid)
+// ────────────────────────────────────────────────────────────
+society.get('/:id/flats/:flatId/payments', async (c) => {
+  const societyId = getAuthorizedSocietyId(c)
+  if (!societyId) return c.json({ error: 'Forbidden' }, 403)
+
+  const flatId = parseInt(c.req.param('flatId'), 10)
+  if (isNaN(flatId)) return c.json({ error: 'Invalid flat id' }, 400)
+
+  const db = getDb(c.env.DATABASE_URL)
+
+  // Verify flat belongs to this society
+  const [flat] = await db
+    .select({ id: flats.id })
+    .from(flats)
+    .where(and(eq(flats.id, flatId), eq(flats.societyId, societyId)))
+    .limit(1)
+  if (!flat) return c.json({ error: 'Flat not found' }, 404)
+
+  const rows = await db
+    .select({
+      paymentId: payments.id,
+      amount: payments.amount,
+      frequency: payments.frequency,
+      mode: payments.mode,
+      gateway: payments.gateway,
+      gatewayTxnId: payments.gatewayTxnId,
+      status: payments.status,
+      receiptUrl: payments.receiptUrl,
+      paidAt: payments.paidAt,
+      fyLabel: maintenanceMaster.fyLabel,
+    })
+    .from(payments)
+    .innerJoin(maintenanceMaster, eq(payments.maintenanceMasterId, maintenanceMaster.id))
+    .where(eq(payments.flatId, flatId))
+    .orderBy(desc(payments.paidAt))
+
+  return c.json({ payments: rows })
+})
+
 // Helper used by record-payment route
 function pickFrequencyAmount(
   master: typeof maintenanceMaster.$inferSelect,

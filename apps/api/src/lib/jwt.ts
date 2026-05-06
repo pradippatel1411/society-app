@@ -10,6 +10,7 @@ export type JwtPayload = {
   mobile: string
   userType: 'product_owner' | 'super_admin' | 'society_user'
   superAdminId?: number | null
+  societyId?: number | null
   societyRoles?: SocietyRoleEntry[]
 }
 

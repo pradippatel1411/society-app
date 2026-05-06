@@ -135,7 +135,7 @@ useEffect(() => {
         }
       }>("/auth/verifyOTP", {
         method: "POST",
-        body: { mobile, otp, scope: "super_admin" },
+        body: { mobile, otp, scope: "super_admin", scopeRef: slug },
       })
       login(res.token, res.user)
       navigate(`/${slug}/dashboard`, { replace: true })

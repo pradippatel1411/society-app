@@ -131,6 +131,7 @@ export default function SocietyLogin() {
           name: string | null
           userType: "society_user"
           superAdminId: number | null
+          societyId?: number | null
           societyRoles?: Array<{
             societyId: number
             role: "chairman" | "secretary" | "cashier" | "committee" | "member"
@@ -138,7 +139,7 @@ export default function SocietyLogin() {
         }
       }>("/auth/verifyOTP", {
         method: "POST",
-        body: { mobile, otp, scope: "society" },
+        body: { mobile, otp, scope: "society", scopeRef: `${slug}/${societySlug}` },
       })
 
       // Verify user belongs to this society at all — the layout will do deeper checks

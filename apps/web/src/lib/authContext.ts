@@ -11,6 +11,7 @@ export type AuthUser = {
   name: string | null
   userType: "product_owner" | "super_admin" | "society_user"
   superAdminId?: number | null
+  societyId?: number | null
   societyRoles?: SocietyRoleEntry[]
 }
 
