@@ -8,6 +8,7 @@ import type { MemberContext } from "./MemberLayout"
 type Payment = {
   paymentId: number
   amount: number
+  penaltyAmount: number
   frequency: string
   mode: string
   gateway: string | null
@@ -140,8 +141,13 @@ function PaymentRow({ payment: p }: { payment: Payment }) {
         <p className="font-serif text-lg text-emerald-700 tabular">
           ₹{p.amount.toLocaleString("en-IN")}
         </p>
+        {p.penaltyAmount > 0 && (
+          <p className="font-serif text-sm text-orange-600 tabular">
+            Penalty: ₹{p.penaltyAmount.toLocaleString("en-IN")}
+          </p>
+        )}
         <span
-          className={`text-[10px] capitalize ${
+          className={`text-[10px] capitalize block mt-1 ${
             p.status === "success" ? "text-emerald-600" : "text-amber-600"
           }`}
         >

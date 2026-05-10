@@ -72,6 +72,15 @@ export type MaintenanceMasterStatus = (typeof MAINTENANCE_MASTER_STATUS)[number]
 export const PAYMENT_TRACK_STATUS = ['unpaid', 'paid'] as const
 export type PaymentTrackStatus = (typeof PAYMENT_TRACK_STATUS)[number]
 
+// Payment track per flat per installment/cycle
+export const PAYMENT_CYCLE_TRACK_STATUS = [
+  'unpaid',
+  'partial',
+  'paid',
+  'penalty_due',
+] as const
+export type PaymentCycleTrackStatus = (typeof PAYMENT_CYCLE_TRACK_STATUS)[number]
+
 // How a payment was made
 export const PAYMENT_MODES = ['upi', 'cash', 'cheque', 'manual'] as const
 export type PaymentMode = (typeof PAYMENT_MODES)[number]

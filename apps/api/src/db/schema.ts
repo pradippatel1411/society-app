@@ -3,6 +3,7 @@ import {
   serial,
   text,
   timestamp,
+  date,
   varchar,
   integer,
   boolean,
@@ -20,6 +21,7 @@ import {
   MaintenanceFrequency,
   MaintenanceMasterStatus,
   PaymentTrackStatus,
+  PaymentCycleTrackStatus,
   PaymentMode,
   PaymentStatus,
   PaymentGateway,
@@ -189,7 +191,9 @@ export const societyRoles = pgTable(
 // Sets enabled frequencies + amount for each enabled frequency.
 // Only fill columns for frequencies you enable; leave others null.
 // ============================================================
-export const maintenanceMaster = pgTable('maintenance_master', {
+export const maintenanceMaster = pgTable(
+  'maintenance_master',
+  {
   id: serial('id').primaryKey(),
   societyId: integer('society_id')
     .notNull()
@@ -218,8 +222,15 @@ export const maintenanceMaster = pgTable('maintenance_master', {
     .$type<MaintenanceMasterStatus>()
     .default('active')
     .notNull(),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-})
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('maintenance_master_society_fy_idx').on(
+      table.societyId,
+      table.fyLabel
+    ),
+  ]
+)
 
 // ============================================================
 // Table 8: flat_payment_track
@@ -244,6 +255,8 @@ export const flatPaymentTrack = pgTable(
     // Total FY amount = freq_amount × cycles_per_year (set on first payment)
     totalAmount: integer('total_amount'),
     paidAmount: integer('paid_amount').default(0).notNull(),
+    penaltyAmount: integer('penalty_amount').default(0).notNull(),
+    penaltyPaidAmount: integer('penalty_paid_amount').default(0).notNull(),
     status: varchar('status', { length: 20 })
       .$type<PaymentTrackStatus>()
       .default('unpaid')
@@ -260,7 +273,90 @@ export const flatPaymentTrack = pgTable(
 )
 
 // ============================================================
-// Table 9: payments
+// Table 9: maintenance_cycles
+// Installment windows for a maintenance master. These rows define
+// when each monthly/quarterly/half-yearly/yearly cycle is due.
+// ============================================================
+export const maintenanceCycles = pgTable(
+  'maintenance_cycles',
+  {
+    id: serial('id').primaryKey(),
+    maintenanceMasterId: integer('maintenance_master_id')
+      .notNull()
+      .references(() => maintenanceMaster.id, { onDelete: 'cascade' }),
+    societyId: integer('society_id')
+      .notNull()
+      .references(() => societies.id, { onDelete: 'cascade' }),
+    frequency: varchar('frequency', { length: 20 })
+      .$type<MaintenanceFrequency>()
+      .notNull(),
+    cycleNo: integer('cycle_no').notNull(),
+    label: varchar('label', { length: 100 }).notNull(),
+    periodStartDate: date('period_start_date').notNull(),
+    periodEndDate: date('period_end_date').notNull(),
+    dueStartDate: date('due_start_date').notNull(),
+    dueEndDate: date('due_end_date').notNull(),
+    amountOwner: integer('amount_owner').notNull(),
+    amountTenant: integer('amount_tenant').notNull(),
+    penaltyPerDayOwner: integer('penalty_per_day_owner').default(0).notNull(),
+    penaltyPerDayTenant: integer('penalty_per_day_tenant').default(0).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('maintenance_cycle_master_frequency_no_idx').on(
+      table.maintenanceMasterId,
+      table.frequency,
+      table.cycleNo
+    ),
+    index('maintenance_cycles_master_idx').on(table.maintenanceMasterId),
+    index('maintenance_cycles_society_idx').on(table.societyId),
+  ]
+)
+
+// ============================================================
+// Table 10: flat_payment_cycle_tracks
+// Per-flat installment accounting. This table stores due/paid/penalty
+// state per flat per cycle, while flat_payment_track stays the FY summary.
+// ============================================================
+export const flatPaymentCycleTracks = pgTable(
+  'flat_payment_cycle_tracks',
+  {
+    id: serial('id').primaryKey(),
+    maintenanceCycleId: integer('maintenance_cycle_id')
+      .notNull()
+      .references(() => maintenanceCycles.id, { onDelete: 'cascade' }),
+    maintenanceMasterId: integer('maintenance_master_id')
+      .notNull()
+      .references(() => maintenanceMaster.id, { onDelete: 'cascade' }),
+    flatPaymentTrackId: integer('flat_payment_track_id')
+      .notNull()
+      .references(() => flatPaymentTrack.id, { onDelete: 'cascade' }),
+    flatId: integer('flat_id')
+      .notNull()
+      .references(() => flats.id, { onDelete: 'cascade' }),
+    amountDue: integer('amount_due').notNull(),
+    paidAmount: integer('paid_amount').default(0).notNull(),
+    penaltyAmount: integer('penalty_amount').default(0).notNull(),
+    penaltyPaidAmount: integer('penalty_paid_amount').default(0).notNull(),
+    status: varchar('status', { length: 20 })
+      .$type<PaymentCycleTrackStatus>()
+      .default('unpaid')
+      .notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('flat_cycle_track_idx').on(
+      table.maintenanceCycleId,
+      table.flatId
+    ),
+    index('flat_cycle_track_master_idx').on(table.maintenanceMasterId),
+    index('flat_cycle_track_summary_idx').on(table.flatPaymentTrackId),
+  ]
+)
+
+// ============================================================
+// Table 11: payments
 // Each successful payment a member made for a maintenance master.
 // Multiple payments can exist for one flat_payment_track.
 // ============================================================
@@ -277,6 +373,8 @@ export const payments = pgTable('payments', {
     .$type<MaintenanceFrequency>()
     .notNull(),
   amount: integer('amount').notNull(),
+  penaltyAmount: integer('penalty_amount').default(0).notNull(),
+  cyclesCount: integer('cycles_count').default(1).notNull(),
   mode: varchar('mode', { length: 20 }).$type<PaymentMode>().notNull(),
   gateway: varchar('gateway', { length: 50 }).$type<PaymentGateway>(),
   gatewayTxnId: varchar('gateway_txn_id', { length: 200 }),
@@ -290,7 +388,7 @@ export const payments = pgTable('payments', {
 })
 
 // ============================================================
-// Table 10: otps
+// Table 12: otps
 // Sent OTPs awaiting verification. Cleaned up periodically.
 // ============================================================
 export const otps = pgTable(
@@ -378,19 +476,58 @@ export const maintenanceMasterRelations = relations(
       references: [societies.id],
     }),
     tracks: many(flatPaymentTrack),
+    cycles: many(maintenanceCycles),
     payments: many(payments),
   })
 )
 
 export const flatPaymentTrackRelations = relations(
   flatPaymentTrack,
-  ({ one }) => ({
+  ({ one, many }) => ({
     master: one(maintenanceMaster, {
       fields: [flatPaymentTrack.maintenanceMasterId],
       references: [maintenanceMaster.id],
     }),
     flat: one(flats, {
       fields: [flatPaymentTrack.flatId],
+      references: [flats.id],
+    }),
+    cycleTracks: many(flatPaymentCycleTracks),
+  })
+)
+
+export const maintenanceCyclesRelations = relations(
+  maintenanceCycles,
+  ({ one, many }) => ({
+    master: one(maintenanceMaster, {
+      fields: [maintenanceCycles.maintenanceMasterId],
+      references: [maintenanceMaster.id],
+    }),
+    society: one(societies, {
+      fields: [maintenanceCycles.societyId],
+      references: [societies.id],
+    }),
+    flatCycleTracks: many(flatPaymentCycleTracks),
+  })
+)
+
+export const flatPaymentCycleTracksRelations = relations(
+  flatPaymentCycleTracks,
+  ({ one }) => ({
+    cycle: one(maintenanceCycles, {
+      fields: [flatPaymentCycleTracks.maintenanceCycleId],
+      references: [maintenanceCycles.id],
+    }),
+    master: one(maintenanceMaster, {
+      fields: [flatPaymentCycleTracks.maintenanceMasterId],
+      references: [maintenanceMaster.id],
+    }),
+    summaryTrack: one(flatPaymentTrack, {
+      fields: [flatPaymentCycleTracks.flatPaymentTrackId],
+      references: [flatPaymentTrack.id],
+    }),
+    flat: one(flats, {
+      fields: [flatPaymentCycleTracks.flatId],
       references: [flats.id],
     }),
   })

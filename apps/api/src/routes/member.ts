@@ -5,7 +5,9 @@ import {
   flats,
   flatMembers,
   maintenanceMaster,
+  maintenanceCycles,
   flatPaymentTrack,
+  flatPaymentCycleTracks,
   payments,
   societies,
   users,
@@ -70,6 +72,21 @@ function pickAmount(
 //   - If track has frequency locked:
 //     show outstanding amount + frequency
 // ────────────────────────────────────────────────────────────
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function startOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
+}
+
+function lateDaysFromDueEnd(dueEndDate: Date, now = new Date()): number {
+  return Math.max(
+    0,
+    Math.floor(
+      (startOfDay(now).getTime() - startOfDay(dueEndDate).getTime()) / DAY_MS
+    )
+  )
+}
+
 member.get('/dues', async (c) => {
   const user = c.get('user')
   const db = getDb(c.env.DATABASE_URL)
@@ -248,9 +265,292 @@ member.get('/dues', async (c) => {
 })
 
 // ────────────────────────────────────────────────────────────
-// GET /member/payments
-// Payment history for the user's flats
+// GET /member/penalty
+// Returns all penalty dues for the user across all flats and masters.
 // ────────────────────────────────────────────────────────────
+member.get('/penalty', async (c) => {
+  const user = c.get('user')
+  const db = getDb(c.env.DATABASE_URL)
+
+  if (!user.societyId) {
+    return c.json({ error: 'Society context missing from token' }, 401)
+  }
+
+  const myFlats = await db
+    .select({
+      flatId: flatMembers.flatId,
+      block: flats.block,
+      flatNo: flats.flatNo,
+      residencyType: flats.residencyType,
+      societyName: societies.name,
+    })
+    .from(flatMembers)
+    .innerJoin(flats, eq(flatMembers.flatId, flats.id))
+    .innerJoin(societies, eq(flats.societyId, societies.id))
+    .where(
+      and(
+        eq(flatMembers.userId, user.userId),
+        eq(flats.societyId, user.societyId)
+      )
+    )
+
+  if (myFlats.length === 0) {
+    return c.json({
+      penalties: [],
+      summary: { totalPenaltyDue: 0, totalBaseDue: 0 },
+    })
+  }
+
+  const flatIds = myFlats.map((flat) => flat.flatId)
+  const requestedFrequencyRaw = c.req.query('frequency')
+  const requestedFrequency = Array.isArray(requestedFrequencyRaw)
+    ? requestedFrequencyRaw[0]
+    : requestedFrequencyRaw
+  const validFrequencies = ['monthly', 'quarterly', 'half_yearly', 'yearly']
+
+  if (requestedFrequency && !validFrequencies.includes(requestedFrequency)) {
+    return c.json(
+      { error: `Invalid frequency. Must be one of: ${validFrequencies.join(', ')}` },
+      400
+    )
+  }
+
+  const summaryTracks = await db
+    .select({
+      id: flatPaymentTrack.id,
+      flatId: flatPaymentTrack.flatId,
+      maintenanceMasterId: flatPaymentTrack.maintenanceMasterId,
+      frequency: flatPaymentTrack.frequency,
+      totalAmount: flatPaymentTrack.totalAmount,
+      paidAmount: flatPaymentTrack.paidAmount,
+      penaltyAmount: flatPaymentTrack.penaltyAmount,
+      penaltyPaidAmount: flatPaymentTrack.penaltyPaidAmount,
+      fyLabel: maintenanceMaster.fyLabel,
+      fyStartDate: maintenanceMaster.fyStartDate,
+      fyEndDate: maintenanceMaster.fyEndDate,
+      masterStatus: maintenanceMaster.status,
+    })
+    .from(flatPaymentTrack)
+    .innerJoin(
+      maintenanceMaster,
+      eq(flatPaymentTrack.maintenanceMasterId, maintenanceMaster.id)
+    )
+    .where(
+      and(
+        inArray(flatPaymentTrack.flatId, flatIds),
+        eq(maintenanceMaster.societyId, user.societyId)
+      )
+    )
+
+  // Include flats without tracks if frequency is provided
+  const tracksWithFrequency = summaryTracks.filter((track) => {
+    return track.frequency !== null || requestedFrequency != null
+  })
+
+  if (tracksWithFrequency.length === 0) {
+    return c.json({
+      penalties: [],
+      summary: { totalPenaltyDue: 0, totalBaseDue: 0 },
+    })
+  }
+
+  const masterIds = [
+    ...new Set(tracksWithFrequency.map((track) => track.maintenanceMasterId)),
+  ]
+  const cycles = await db
+    .select()
+    .from(maintenanceCycles)
+    .where(inArray(maintenanceCycles.maintenanceMasterId, masterIds))
+
+  const cycleIds = cycles.map((cycle) => cycle.id)
+  const cycleTracks =
+    cycleIds.length === 0
+      ? []
+      : await db
+          .select()
+          .from(flatPaymentCycleTracks)
+          .where(
+            and(
+              inArray(flatPaymentCycleTracks.flatId, flatIds),
+              inArray(flatPaymentCycleTracks.maintenanceCycleId, cycleIds)
+            )
+          )
+
+  const flatMap = new Map(myFlats.map((flat) => [flat.flatId, flat]))
+  const cycleTrackMap = new Map(
+    cycleTracks.map((track) => [
+      `${track.flatId}:${track.maintenanceCycleId}`,
+      track,
+    ])
+  )
+
+  const penalties = []
+  for (const summaryTrack of tracksWithFrequency) {
+    const selectedFrequency = summaryTrack.frequency ?? requestedFrequency
+    if (!selectedFrequency) continue
+
+    const flat = flatMap.get(summaryTrack.flatId)
+    if (!flat) continue
+
+    const relevantCycles = cycles.filter(
+      (cycle) =>
+        cycle.maintenanceMasterId === summaryTrack.maintenanceMasterId &&
+        cycle.frequency === selectedFrequency
+    )
+
+    for (const cycle of relevantCycles) {
+      const lateDays = lateDaysFromDueEnd(cycle.dueEndDate)
+      if (lateDays <= 0) continue
+
+      const cycleTrack = cycleTrackMap.get(`${summaryTrack.flatId}:${cycle.id}`)
+      const amountDue =
+        cycleTrack?.amountDue ??
+        (flat.residencyType === 'tenant' ? cycle.amountTenant : cycle.amountOwner)
+      const paidAmount = cycleTrack?.paidAmount ?? 0
+      const baseDue = Math.max(0, amountDue - paidAmount)
+      if (baseDue <= 0) continue
+
+      const penaltyPerDay =
+        flat.residencyType === 'tenant'
+          ? cycle.penaltyPerDayTenant
+          : cycle.penaltyPerDayOwner
+      const calculatedPenalty = lateDays * penaltyPerDay
+      const penaltyAmount = Math.max(
+        cycleTrack?.penaltyAmount ?? 0,
+        calculatedPenalty
+      )
+      const penaltyPaidAmount = cycleTrack?.penaltyPaidAmount ?? 0
+      const penaltyDue = Math.max(0, penaltyAmount - penaltyPaidAmount)
+
+      if (penaltyDue <= 0 && penaltyPerDay <= 0) continue
+
+      penalties.push({
+        masterId: summaryTrack.maintenanceMasterId,
+        fyLabel: summaryTrack.fyLabel,
+        frequency: selectedFrequency,
+        flat: {
+          id: flat.flatId,
+          block: flat.block,
+          flatNo: flat.flatNo,
+          label: `${flat.block}-${flat.flatNo}`,
+          residencyType: flat.residencyType,
+          societyName: flat.societyName,
+        },
+        cycle: {
+          id: cycle.id,
+          cycleNo: cycle.cycleNo,
+          label: cycle.label,
+          periodStartDate: cycle.periodStartDate,
+          periodEndDate: cycle.periodEndDate,
+          dueStartDate: cycle.dueStartDate,
+          dueEndDate: cycle.dueEndDate,
+        },
+        amountDue,
+        paidAmount,
+        baseDue,
+        lateDays,
+        penaltyPerDay,
+        penaltyAmount,
+        penaltyPaidAmount,
+        penaltyDue,
+        cycleTrackId: cycleTrack?.id ?? null,
+        cycleTrackStatus: cycleTrack?.status ?? 'unpaid',
+      })
+    }
+  }
+
+  penalties.sort((a, b) => {
+    const dueDiff =
+      new Date(a.cycle.dueEndDate).getTime() -
+      new Date(b.cycle.dueEndDate).getTime()
+    if (dueDiff !== 0) return dueDiff
+    return a.flat.label.localeCompare(b.flat.label, undefined, {
+      numeric: true,
+    })
+  })
+
+  return c.json({
+    penalties,
+    summary: {
+      totalPenaltyDue: penalties.reduce((sum, item) => sum + item.penaltyDue, 0),
+      totalBaseDue: penalties.reduce((sum, item) => sum + item.baseDue, 0),
+    },
+  })
+})
+
+// ────────────────────────────────────────────────────────────
+// GET /member/cycles/:masterId?frequency=...
+// Get maintenance cycles for a master and frequency (for penalty calculation in popup)
+// ────────────────────────────────────────────────────────────
+member.get('/cycles/:masterId', async (c) => {
+  const user = c.get('user')
+  const db = getDb(c.env.DATABASE_URL)
+
+  if (!user.societyId) {
+    return c.json({ error: 'Society context missing from token' }, 401)
+  }
+
+  const masterId = parseInt(c.req.param('masterId'), 10)
+  if (isNaN(masterId)) return c.json({ error: 'Invalid master id' }, 400)
+
+  const frequencyRaw = c.req.query('frequency')
+  if (!frequencyRaw) return c.json({ error: 'frequency query parameter required' }, 400)
+
+  const validFrequencies = ['monthly', 'quarterly', 'half_yearly', 'yearly']
+  if (!validFrequencies.includes(frequencyRaw)) {
+    return c.json({ error: `Invalid frequency. Must be one of: ${validFrequencies.join(', ')}` }, 400)
+  }
+
+  const frequency = frequencyRaw as MaintenanceFrequency
+  const flatIdRaw = c.req.query('flatId')
+  const flatId = flatIdRaw ? parseInt(Array.isArray(flatIdRaw) ? flatIdRaw[0] : flatIdRaw, 10) : null
+  if (flatIdRaw && flatId === null) return c.json({ error: 'Invalid flat id' }, 400)
+
+  // Verify master belongs to user's society
+  const [master] = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(
+      and(
+        eq(maintenanceMaster.id, masterId),
+        eq(maintenanceMaster.societyId, user.societyId)
+      )
+    )
+    .limit(1)
+  if (!master) return c.json({ error: 'Maintenance master not found' }, 404)
+
+  const cycles = await db
+    .select()
+    .from(maintenanceCycles)
+    .where(
+      and(
+        eq(maintenanceCycles.maintenanceMasterId, masterId),
+        eq(maintenanceCycles.frequency, frequency)
+      )
+    )
+    .orderBy(maintenanceCycles.cycleNo)
+
+  if (!flatId) {
+    return c.json({ cycles })
+  }
+
+  const paidCycleRows = await db
+    .select({ maintenanceCycleId: flatPaymentCycleTracks.maintenanceCycleId })
+    .from(flatPaymentCycleTracks)
+    .where(
+      and(
+        eq(flatPaymentCycleTracks.flatId, flatId),
+        eq(flatPaymentCycleTracks.maintenanceMasterId, masterId),
+        inArray(flatPaymentCycleTracks.maintenanceCycleId, cycles.map((cycle) => cycle.id))
+      )
+    )
+
+  const paidCycleIds = new Set(paidCycleRows.map((row) => row.maintenanceCycleId))
+  const unpaidCycles = cycles.filter((cycle) => !paidCycleIds.has(cycle.id))
+
+  return c.json({ cycles: unpaidCycles })
+})
+
 member.get('/payments', async (c) => {
   const user = c.get('user')
   const db = getDb(c.env.DATABASE_URL)
@@ -276,6 +576,7 @@ member.get('/payments', async (c) => {
     .select({
       paymentId: payments.id,
       amount: payments.amount,
+      penaltyAmount: payments.penaltyAmount,
       frequency: payments.frequency,
       mode: payments.mode,
       gateway: payments.gateway,
@@ -394,14 +695,17 @@ member.post('/pay', async (c) => {
   const body = await c.req.json().catch(() => null)
   if (!body) return c.json({ error: 'Invalid request body' }, 400)
 
-  const { masterId, flatId, frequency, amount, mode, gatewayTxnId } = body as {
+  const { masterId, flatId, frequency, amount, mode, gatewayTxnId, penaltyAmount } = body as {
     masterId: number
     flatId: number
     frequency: string
     amount: number
     mode: string
     gatewayTxnId?: string | null
+    penaltyAmount?: number
   }
+
+  const actualPenaltyAmount = penaltyAmount ?? 0
 
   if (!masterId || !flatId || !frequency || !amount || !mode) {
     return c.json({ error: 'Missing required fields: masterId, flatId, frequency, amount, mode' }, 400)
@@ -545,6 +849,8 @@ member.post('/pay', async (c) => {
     )
   }
 
+  const cyclesPaid = amount / freqAmount
+
   // Insert the payment row
   const [payment] = await db
     .insert(payments)
@@ -554,6 +860,8 @@ member.post('/pay', async (c) => {
       paidByUserId: user.userId,
       frequency: lockedFrequency,
       amount,
+      penaltyAmount: actualPenaltyAmount,
+      cyclesCount: cyclesPaid,
       mode: mode as 'upi' | 'cash' | 'cheque' | 'manual',
       gateway: null,
       gatewayTxnId: gatewayTxnId ?? null,
@@ -562,12 +870,94 @@ member.post('/pay', async (c) => {
     })
     .returning()
 
+  // Insert detail rows for the paid cycles
+  const maintenanceCyclesRows = await db
+    .select()
+    .from(maintenanceCycles)
+    .where(
+      and(
+        eq(maintenanceCycles.maintenanceMasterId, masterId),
+        eq(maintenanceCycles.frequency, lockedFrequency)
+      )
+    )
+    .orderBy(maintenanceCycles.cycleNo)
+
+  if (maintenanceCyclesRows.length === 0) {
+    return c.json({ error: 'Maintenance cycles not found for this frequency' }, 500)
+  }
+
+  const existingCycleRows = await db
+    .select({
+      maintenanceCycleId: flatPaymentCycleTracks.maintenanceCycleId,
+    })
+    .from(flatPaymentCycleTracks)
+    .where(
+      and(
+        eq(flatPaymentCycleTracks.flatId, flatId),
+        eq(flatPaymentCycleTracks.maintenanceMasterId, masterId),
+        inArray(
+          flatPaymentCycleTracks.maintenanceCycleId,
+          maintenanceCyclesRows.map((cycle) => cycle.id)
+        )
+      )
+    )
+
+  const existingCycleIds = new Set(
+    existingCycleRows.map((row) => row.maintenanceCycleId)
+  )
+  const unpaidCycles = maintenanceCyclesRows.filter(
+    (cycle) => !existingCycleIds.has(cycle.id)
+  )
+  const cyclesToInsert = unpaidCycles.slice(0, cyclesPaid)
+
+  if (cyclesToInsert.length !== cyclesPaid) {
+    return c.json(
+      {
+        error:
+          'Unable to allocate payment to maintenance cycles. Please contact support.',
+      },
+      500
+    )
+  }
+
+  const cycleTrackRows = cyclesToInsert.map((cycle) => {
+    const lateDays = lateDaysFromDueEnd(cycle.dueEndDate)
+    const penaltyPerDay =
+      flat.residencyType === 'tenant'
+        ? cycle.penaltyPerDayTenant
+        : cycle.penaltyPerDayOwner
+    const calculatedPenalty = lateDays * penaltyPerDay
+    return {
+      maintenanceCycleId: cycle.id,
+      maintenanceMasterId: masterId,
+      flatPaymentTrackId: trackId,
+      flatId,
+      amountDue:
+        flat.residencyType === 'tenant' ? cycle.amountTenant : cycle.amountOwner,
+      paidAmount:
+        flat.residencyType === 'tenant' ? cycle.amountTenant : cycle.amountOwner,
+      penaltyAmount: calculatedPenalty,
+      penaltyPaidAmount: calculatedPenalty, // Assuming paying the full penalty
+      status: 'paid' as const,
+    }
+  })
+
+  if (cycleTrackRows.length > 0) {
+    await db.insert(flatPaymentCycleTracks).values(cycleTrackRows)
+  }
+
   // Update the track
   const newPaid = currentPaid + amount
+  const newPenaltyPaid = (existingTrack?.penaltyPaidAmount ?? 0) + actualPenaltyAmount
   const newStatus = newPaid >= totalAmount ? 'paid' : 'unpaid'
   await db
     .update(flatPaymentTrack)
-    .set({ paidAmount: newPaid, status: newStatus, updatedAt: new Date() })
+    .set({ 
+      paidAmount: newPaid, 
+      penaltyPaidAmount: newPenaltyPaid,
+      status: newStatus, 
+      updatedAt: new Date() 
+    })
     .where(eq(flatPaymentTrack.id, trackId))
 
   return c.json({
@@ -578,6 +968,7 @@ member.post('/pay', async (c) => {
       frequency: lockedFrequency,
       totalAmount,
       paidAmount: newPaid,
+      penaltyPaidAmount: newPenaltyPaid,
       status: newStatus,
       outstanding: totalAmount - newPaid,
     },

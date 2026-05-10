@@ -9,7 +9,9 @@ import {
   users,
   societyRoles,
   maintenanceMaster,
+  maintenanceCycles,
   flatPaymentTrack,
+  flatPaymentCycleTracks,
   payments,
 } from '../db/schema'
 import { requireAuth, requireUserType } from '../lib/middleware'
@@ -260,6 +262,27 @@ society.get('/:id/members', async (c) => {
     .innerJoin(users, eq(flatMembers.userId, users.id))
     .where(inArray(flatMembers.flatId, flatIds))
 
+  const userIds = [...new Set(memberships.map((m) => m.userId))]
+  const roleRows =
+    userIds.length === 0
+      ? []
+      : await db
+          .select({
+            userId: societyRoles.userId,
+            role: societyRoles.role,
+          })
+          .from(societyRoles)
+          .where(
+            and(
+              eq(societyRoles.societyId, societyId),
+              inArray(societyRoles.userId, userIds),
+              eq(societyRoles.isActive, true)
+            )
+          )
+
+  const roleMap = new Map<number, SocietyRole>()
+  for (const r of roleRows) roleMap.set(r.userId, r.role)
+
   const result = flatList.map((f) => ({
     id: f.id,
     block: f.block,
@@ -275,6 +298,7 @@ society.get('/:id/members', async (c) => {
         name: m.name,
         relation: m.relation,
         isPrimary: m.isPrimary,
+        role: roleMap.get(m.userId) ?? 'member',
       })),
   }))
 
@@ -964,6 +988,11 @@ society.get('/:id/maintenance-master/:masterId', async (c) => {
 // one flat_payment_track row per flat (with frequency = null until
 // the flat's first payment).
 // ────────────────────────────────────────────────────────────
+const dueWindowSchema = z.object({
+  dueStartDay: z.number().int().min(1).max(31),
+  dueEndDay: z.number().int().min(1).max(31),
+})
+
 const createMasterSchema = z
   .object({
     fyLabel: z.string().min(2).max(50),
@@ -985,6 +1014,12 @@ const createMasterSchema = z
     // Penalty (informational — chairman handles offline)
     penaltyPerDayOwner: z.number().int().min(0).optional(),
     penaltyPerDayTenant: z.number().int().min(0).optional(),
+    dueWindows: z.object({
+      monthly: dueWindowSchema.optional(),
+      quarterly: dueWindowSchema.optional(),
+      halfYearly: dueWindowSchema.optional(),
+      yearly: dueWindowSchema.optional(),
+    }),
   })
   .refine(
     (d) => {
@@ -1025,6 +1060,83 @@ const createMasterSchema = z
         'For each enabled frequency, both owner and tenant amounts must be provided',
     }
   )
+  .refine(
+    (d) => {
+      if (d.ownerMonthly != null && !d.dueWindows.monthly) return false
+      if (d.ownerQuarterly != null && !d.dueWindows.quarterly) return false
+      if (d.ownerHalfYearly != null && !d.dueWindows.halfYearly) return false
+      if (d.ownerYearly != null && !d.dueWindows.yearly) return false
+      return true
+    },
+    {
+      message: 'Due window is required for each enabled frequency',
+    }
+  )
+  .refine(
+    (d) =>
+      Object.values(d.dueWindows).every(
+        (w) => !w || w.dueEndDay >= w.dueStartDay
+      ),
+    {
+      message: 'Due end day must be greater than or equal to due start day',
+    }
+  )
+
+type EnabledFrequencyConfig = {
+  frequency: MaintenanceFrequency
+  labelPrefix: string
+  monthsPerCycle: number
+  cycleCount: number
+  ownerAmount: number
+  tenantAmount: number
+  dueStartDay: number
+  dueEndDay: number
+}
+
+function getDaysInMonth(year: number, monthIndex: number): number {
+  return new Date(year, monthIndex + 1, 0).getDate()
+}
+
+function dateFromMonthDay(base: Date, day: number): Date {
+  return new Date(
+    base.getFullYear(),
+    base.getMonth(),
+    Math.min(day, getDaysInMonth(base.getFullYear(), base.getMonth()))
+  )
+}
+
+function addMonths(date: Date, months: number): Date {
+  return new Date(date.getFullYear(), date.getMonth() + months, date.getDate())
+}
+
+function formatCycleLabel(prefix: string, start: Date, end: Date): string {
+  const startLabel = start.toLocaleString('en-US', {
+    month: 'short',
+    year: 'numeric',
+  })
+  const endLabel = end.toLocaleString('en-US', {
+    month: 'short',
+    year: 'numeric',
+  })
+  return startLabel === endLabel
+    ? `${prefix} ${startLabel}`
+    : `${prefix} ${startLabel}-${endLabel}`
+}
+
+function parseFyLabel(label: string): number | null {
+  const match = /^FY (\d{4})-(\d{2})$/.exec(label)
+  if (!match) return null
+
+  const startYear = Number(match[1])
+  const endYearShort = Number(match[2])
+  if ((startYear + 1) % 100 !== endYearShort) return null
+
+  return startYear
+}
+
+function dateInputValue(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
 
 society.post('/:id/maintenance-master', async (c) => {
   const societyId = getAuthorizedSocietyId(c, [
@@ -1050,10 +1162,79 @@ society.post('/:id/maintenance-master', async (c) => {
   }
 
   const data = parsed.data
+  const fyStartYear = parseFyLabel(data.fyLabel)
+  if (fyStartYear == null) {
+    return c.json({ error: 'Select a valid financial year' }, 400)
+  }
+
   const fyStartDate = new Date(data.fyStartDate)
   const fyEndDate = new Date(data.fyEndDate)
+  const expectedFyStart = `${fyStartYear}-04-01`
+  const expectedFyEnd = `${fyStartYear + 1}-03-31`
+  if (
+    dateInputValue(fyStartDate) !== expectedFyStart ||
+    dateInputValue(fyEndDate) !== expectedFyEnd
+  ) {
+    return c.json(
+      {
+        error: `FY dates must match ${data.fyLabel}: ${expectedFyStart} to ${expectedFyEnd}`,
+      },
+      400
+    )
+  }
+
   if (fyEndDate <= fyStartDate) {
     return c.json({ error: 'FY end date must be after FY start date' }, 400)
+  }
+
+  const enabledFrequencies: EnabledFrequencyConfig[] = []
+  if (data.ownerMonthly != null && data.tenantMonthly != null && data.dueWindows.monthly) {
+    enabledFrequencies.push({
+      frequency: 'monthly',
+      labelPrefix: 'Monthly',
+      monthsPerCycle: 1,
+      cycleCount: 12,
+      ownerAmount: data.ownerMonthly,
+      tenantAmount: data.tenantMonthly,
+      dueStartDay: data.dueWindows.monthly.dueStartDay,
+      dueEndDay: data.dueWindows.monthly.dueEndDay,
+    })
+  }
+  if (data.ownerQuarterly != null && data.tenantQuarterly != null && data.dueWindows.quarterly) {
+    enabledFrequencies.push({
+      frequency: 'quarterly',
+      labelPrefix: 'Quarterly',
+      monthsPerCycle: 3,
+      cycleCount: 4,
+      ownerAmount: data.ownerQuarterly,
+      tenantAmount: data.tenantQuarterly,
+      dueStartDay: data.dueWindows.quarterly.dueStartDay,
+      dueEndDay: data.dueWindows.quarterly.dueEndDay,
+    })
+  }
+  if (data.ownerHalfYearly != null && data.tenantHalfYearly != null && data.dueWindows.halfYearly) {
+    enabledFrequencies.push({
+      frequency: 'half_yearly',
+      labelPrefix: 'Half-yearly',
+      monthsPerCycle: 6,
+      cycleCount: 2,
+      ownerAmount: data.ownerHalfYearly,
+      tenantAmount: data.tenantHalfYearly,
+      dueStartDay: data.dueWindows.halfYearly.dueStartDay,
+      dueEndDay: data.dueWindows.halfYearly.dueEndDay,
+    })
+  }
+  if (data.ownerYearly != null && data.tenantYearly != null && data.dueWindows.yearly) {
+    enabledFrequencies.push({
+      frequency: 'yearly',
+      labelPrefix: 'Yearly',
+      monthsPerCycle: 12,
+      cycleCount: 1,
+      ownerAmount: data.ownerYearly,
+      tenantAmount: data.tenantYearly,
+      dueStartDay: data.dueWindows.yearly.dueStartDay,
+      dueEndDay: data.dueWindows.yearly.dueEndDay,
+    })
   }
 
   const db = getDb(c.env.DATABASE_URL)
@@ -1115,14 +1296,49 @@ society.post('/:id/maintenance-master', async (c) => {
     frequency: null as MaintenanceFrequency | null,
     totalAmount: null,
     paidAmount: 0,
+    penaltyAmount: 0,
+    penaltyPaidAmount: 0,
     status: 'unpaid' as const,
   }))
   await db.insert(flatPaymentTrack).values(trackRows)
+
+  const cycleRows = enabledFrequencies.flatMap((config) =>
+    Array.from({ length: config.cycleCount }, (_, index) => {
+      const cycleStart = addMonths(fyStartDate, index * config.monthsPerCycle)
+      const nextCycleStart = addMonths(cycleStart, config.monthsPerCycle)
+      const naturalCycleEnd = new Date(
+        nextCycleStart.getFullYear(),
+        nextCycleStart.getMonth(),
+        0
+      )
+      const cycleEnd = naturalCycleEnd > fyEndDate ? fyEndDate : naturalCycleEnd
+      const dueStartDate = dateFromMonthDay(cycleStart, config.dueStartDay)
+      const dueEndDate = dateFromMonthDay(cycleStart, config.dueEndDay)
+
+      return {
+        maintenanceMasterId: master.id,
+        societyId,
+        frequency: config.frequency,
+        cycleNo: index + 1,
+        label: formatCycleLabel(config.labelPrefix, cycleStart, cycleEnd),
+        periodStartDate: cycleStart,
+        periodEndDate: cycleEnd,
+        dueStartDate,
+        dueEndDate,
+        amountOwner: config.ownerAmount,
+        amountTenant: config.tenantAmount,
+        penaltyPerDayOwner: data.penaltyPerDayOwner ?? 0,
+        penaltyPerDayTenant: data.penaltyPerDayTenant ?? 0,
+      }
+    })
+  )
+  await db.insert(maintenanceCycles).values(cycleRows)
 
   return c.json({
     success: true,
     master,
     tracksCreated: trackRows.length,
+    cyclesCreated: cycleRows.length,
   })
 })
 
@@ -1214,13 +1430,179 @@ society.get('/:id/maintenance-master/:masterId/tracks', async (c) => {
   return c.json({ tracks: rows })
 })
 
+// ────────────────────────────────────────────────────────────
+// GET /society/:id/maintenance-master/:masterId/cycles
+// All maintenance_cycles for a master, grouped by frequency.
+// Each cycle includes per-cycle paid/unpaid/partial counts so
+// the admin can see collection progress at a glance.
+// ────────────────────────────────────────────────────────────
+society.get('/:id/maintenance-master/:masterId/cycles', async (c) => {
+  const societyId = getAuthorizedSocietyId(c)
+  if (!societyId) return c.json({ error: 'Forbidden' }, 403)
+
+  const masterId = parseInt(c.req.param('masterId'), 10)
+  if (isNaN(masterId)) return c.json({ error: 'Invalid master id' }, 400)
+
+  const db = getDb(c.env.DATABASE_URL)
+
+  // Verify master belongs to this society
+  const [master] = await db
+    .select()
+    .from(maintenanceMaster)
+    .where(
+      and(
+        eq(maintenanceMaster.id, masterId),
+        eq(maintenanceMaster.societyId, societyId)
+      )
+    )
+    .limit(1)
+  if (!master) return c.json({ error: 'Master not found' }, 404)
+
+  // All cycles for this master, ordered by frequency + cycleNo
+  const cycles = await db
+    .select()
+    .from(maintenanceCycles)
+    .where(eq(maintenanceCycles.maintenanceMasterId, masterId))
+    .orderBy(maintenanceCycles.frequency, maintenanceCycles.cycleNo)
+
+  if (cycles.length === 0) {
+    return c.json({ cycles: [], grouped: {} })
+  }
+
+  // Per-cycle flat stats: how many flats paid / partial / unpaid
+  const cycleIds = cycles.map((c) => c.id)
+  const cycleTracks = cycleIds.length === 0 ? [] : await db
+    .select({
+      cycleId: flatPaymentCycleTracks.maintenanceCycleId,
+      flatId: flatPaymentCycleTracks.flatId,
+      amountDue: flatPaymentCycleTracks.amountDue,
+      paidAmount: flatPaymentCycleTracks.paidAmount,
+      penaltyAmount: flatPaymentCycleTracks.penaltyAmount,
+      penaltyPaidAmount: flatPaymentCycleTracks.penaltyPaidAmount,
+      status: flatPaymentCycleTracks.status,
+    })
+    .from(flatPaymentCycleTracks)
+    .where(inArray(flatPaymentCycleTracks.maintenanceCycleId, cycleIds))
+
+  // Build a summary per cycle
+  const cycleStats = new Map<number, {
+    totalFlats: number
+    paid: number
+    partial: number
+    unpaid: number
+    penaltyDue: number
+    collectedAmount: number
+    totalDueAmount: number
+  }>()
+
+  for (const cycle of cycles) {
+    const tracks = cycleTracks.filter((t) => t.cycleId === cycle.id)
+    cycleStats.set(cycle.id, {
+      totalFlats: tracks.length,
+      paid: tracks.filter((t) => t.status === 'paid').length,
+      partial: tracks.filter((t) => t.status === 'partial').length,
+      unpaid: tracks.filter((t) => t.status === 'unpaid').length,
+      penaltyDue: tracks.filter((t) => t.status === 'penalty_due').length,
+      collectedAmount: tracks.reduce((s, t) => s + t.paidAmount, 0),
+      totalDueAmount: tracks.reduce((s, t) => s + t.amountDue, 0),
+    })
+  }
+
+  // Group cycles by frequency for the UI
+  const grouped: Record<string, typeof enrichedCycles> = {}
+  const enrichedCycles = cycles.map((cycle) => ({
+    ...cycle,
+    stats: cycleStats.get(cycle.id) ?? {
+      totalFlats: 0,
+      paid: 0,
+      partial: 0,
+      unpaid: 0,
+      penaltyDue: 0,
+      collectedAmount: 0,
+      totalDueAmount: 0,
+    },
+  }))
+
+  for (const cycle of enrichedCycles) {
+    if (!grouped[cycle.frequency]) grouped[cycle.frequency] = []
+    grouped[cycle.frequency].push(cycle)
+  }
+
+  return c.json({
+    master: {
+      id: master.id,
+      fyLabel: master.fyLabel,
+      status: master.status,
+    },
+    cycles: enrichedCycles,
+    grouped,
+  })
+})
+
+const updateMaintenanceCycleSchema = z
+  .object({
+    dueStartDate: z.string().regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/),
+    dueEndDate: z.string().regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/),
+  })
+  .refine(
+    (data) => data.dueStartDate <= data.dueEndDate,
+    {
+      message: 'Start date must be on or before end date',
+      path: ['dueEndDate'],
+    }
+  )
+
+society.patch('/:id/maintenance-master/:masterId/cycles/:cycleId', async (c) => {
+  const societyId = getAuthorizedSocietyId(c)
+  if (!societyId) return c.json({ error: 'Forbidden' }, 403)
+
+  const masterId = parseInt(c.req.param('masterId'), 10)
+  const cycleId = parseInt(c.req.param('cycleId'), 10)
+  if (isNaN(masterId) || isNaN(cycleId)) {
+    return c.json({ error: 'Invalid id' }, 400)
+  }
+
+  const body = await c.req.json()
+  const parsed = updateMaintenanceCycleSchema.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.errors[0]?.message ?? 'Invalid request' }, 400)
+  }
+
+  const db = getDb(c.env.DATABASE_URL)
+  const [cycle] = await db
+    .select()
+    .from(maintenanceCycles)
+    .where(
+      and(
+        eq(maintenanceCycles.id, cycleId),
+        eq(maintenanceCycles.maintenanceMasterId, masterId),
+        eq(maintenanceCycles.societyId, societyId)
+      )
+    )
+    .limit(1)
+
+  if (!cycle) return c.json({ error: 'Maintenance cycle not found' }, 404)
+
+  await db
+    .update(maintenanceCycles)
+    .set({
+      dueStartDate: parsed.data.dueStartDate,
+      dueEndDate: parsed.data.dueEndDate,
+    })
+    .where(eq(maintenanceCycles.id, cycleId))
+
+  return c.json({
+    success: true,
+    cycle: {
+      ...cycle,
+      dueStartDate: parsed.data.dueStartDate,
+      dueEndDate: parsed.data.dueEndDate,
+    },
+  })
+})
+
 // ════════════════════════════════════════════════════════════
 // PAYMENT RECORDING (manual mode — chairman/secretary/cashier)
-// Razorpay self-pay flow will be added in a future step.
-// ════════════════════════════════════════════════════════════
-
-// ────────────────────────────────────────────────────────────
-// POST /society/:id/maintenance-master/:masterId/payments
 // Committee records a manual payment (cash/cheque/upi-screenshot).
 // Locks frequency for the flat on first payment for this FY.
 // ────────────────────────────────────────────────────────────

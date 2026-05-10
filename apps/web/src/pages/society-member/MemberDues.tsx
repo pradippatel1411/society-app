@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { useOutletContext } from "react-router-dom"
 import { Button } from "../../components/ui/Button"
-import { Card, CardBody, CardHeader } from "../../components/ui/Card"
+import { Card, CardBody } from "../../components/ui/Card"
 import { api, ApiError } from "../../lib/api"
 import { useAuth } from "../../lib/useAuth"
 import type { MemberContext } from "./MemberLayout"
@@ -34,6 +34,29 @@ type DueEntry = {
   outstanding: number | null
   status: string
   availableFrequencies?: FrequencyOption[]
+}
+
+type Cycle = {
+  id: number
+  cycleNo: number
+  label: string
+  periodStartDate: string
+  periodEndDate: string
+  dueStartDate: string
+  dueEndDate: string
+  amountOwner: number
+  amountTenant: number
+  penaltyPerDayOwner: number
+  penaltyPerDayTenant: number
+}
+
+type PenaltyDetail = {
+  cycleNo: number
+  label: string
+  dueEndDate: string
+  lateDays: number
+  penaltyPerDay: number
+  penaltyAmount: number
 }
 
 const FREQ_LABEL: Record<string, string> = {
@@ -271,6 +294,7 @@ function PayDialog({
   const [txnId, setTxnId] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [penaltyDetails, setPenaltyDetails] = useState<PenaltyDetail[]>([])
 
   // Compute amount for selected frequency
   const freqOption = due.availableFrequencies?.find((f) => f.frequency === selectedFreq)
@@ -278,9 +302,46 @@ function PayDialog({
   const outstanding = due.outstanding ?? (freqOption ? freqOption.fyTotalIfChosen : 0)
 
   // Number of cycles to pay (default = 1 cycle)
-  const [cycles, setCycles] = useState(1)
+  const [payCycles, setPayCycles] = useState(1)
   const maxCycles = amountPerCycle > 0 ? Math.floor(outstanding / amountPerCycle) : 1
-  const payAmount = amountPerCycle * cycles
+  const baseAmount = amountPerCycle * payCycles
+  const totalPenalty = penaltyDetails.slice(0, payCycles).reduce((sum, p) => sum + p.penaltyAmount, 0)
+  const totalAmount = baseAmount + totalPenalty
+
+  // Fetch cycles when frequency changes
+  useEffect(() => {
+    if (!selectedFreq) return
+
+    const fetchCycles = async () => {
+      try {
+        const res = await api<{ cycles: Cycle[] }>(
+          `/member/cycles/${due.masterId}?frequency=${selectedFreq}&flatId=${due.flat.id}`,
+          { token }
+        )
+
+        const now = new Date()
+        const details: PenaltyDetail[] = res.cycles.map((cycle) => {
+          const dueEnd = new Date(cycle.dueEndDate)
+          const lateDays = Math.max(0, Math.floor((now.getTime() - dueEnd.getTime()) / (24 * 60 * 60 * 1000)))
+          const penaltyPerDay = due.flat.residencyType === 'tenant' ? cycle.penaltyPerDayTenant : cycle.penaltyPerDayOwner
+          const penaltyAmount = lateDays * penaltyPerDay
+          return {
+            cycleNo: cycle.cycleNo,
+            label: cycle.label,
+            dueEndDate: cycle.dueEndDate,
+            lateDays,
+            penaltyPerDay,
+            penaltyAmount,
+          }
+        })
+        setPenaltyDetails(details)
+      } catch {
+        setPenaltyDetails([])
+      }
+    }
+
+    fetchCycles()
+  }, [selectedFreq, due.masterId, due.flat.id, due.flat.residencyType, token])
 
   async function handlePay(e: React.FormEvent) {
     e.preventDefault()
@@ -295,7 +356,8 @@ function PayDialog({
           masterId: due.masterId,
           flatId: due.flat.id,
           frequency: selectedFreq,
-          amount: payAmount,
+          amount: baseAmount,
+          penaltyAmount: totalPenalty,
           mode,
           gatewayTxnId: txnId.trim() || null,
         },
@@ -345,7 +407,7 @@ function PayDialog({
                   <button
                     key={opt.frequency}
                     type="button"
-                    onClick={() => { setSelectedFreq(opt.frequency); setCycles(1) }}
+                    onClick={() => { setSelectedFreq(opt.frequency); setPayCycles(1) }}
                     className={`py-2 px-3 rounded-xl text-sm font-medium transition-all ${
                       selectedFreq === opt.frequency
                         ? "bg-ink text-cream"
@@ -371,17 +433,17 @@ function PayDialog({
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={() => setCycles((c) => Math.max(1, c - 1))}
+                  onClick={() => setPayCycles((c) => Math.max(1, c - 1))}
                   className="w-9 h-9 rounded-full bg-cream-dark text-ink font-medium hover:bg-stone-200 flex items-center justify-center"
                 >
                   −
                 </button>
                 <span className="font-serif text-2xl text-ink tabular w-8 text-center">
-                  {cycles}
+                  {payCycles}
                 </span>
                 <button
                   type="button"
-                  onClick={() => setCycles((c) => Math.min(maxCycles, c + 1))}
+                  onClick={() => setPayCycles((c) => Math.min(maxCycles, c + 1))}
                   className="w-9 h-9 rounded-full bg-cream-dark text-ink font-medium hover:bg-stone-200 flex items-center justify-center"
                 >
                   +
@@ -390,13 +452,58 @@ function PayDialog({
             </div>
           )}
 
+          {/* Penalty Details */}
+          {penaltyDetails.length > 0 && (
+            <div>
+              <label className="block text-xs font-medium text-ink-light uppercase tracking-wider mb-2">
+                Penalty Details
+              </label>
+              <div className="space-y-2">
+                {penaltyDetails.slice(0, payCycles).map((penalty) => (
+                  <div key={penalty.cycleNo} className="bg-cream-light rounded-lg p-3 text-sm">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-medium">{penalty.label}</span>
+                      <span className="text-ink-muted">₹{penalty.penaltyAmount.toLocaleString("en-IN")}</span>
+                    </div>
+                    <div className="text-xs text-ink-muted">
+                      Due: {new Date(penalty.dueEndDate).toLocaleDateString()} | 
+                      Late: {penalty.lateDays} days | 
+                      ₹{penalty.penaltyPerDay}/day
+                    </div>
+                  </div>
+                ))}
+                {payCycles > penaltyDetails.length && (
+                  <div className="bg-cream-light rounded-lg p-3 text-sm text-ink-muted">
+                    Additional cycles: No penalty (not overdue)
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Amount summary */}
           {amountPerCycle > 0 && (
-            <div className="bg-cream-light rounded-xl p-4 flex items-center justify-between">
-              <span className="text-sm text-ink-muted">Amount to pay</span>
-              <span className="font-serif text-2xl text-ink tabular">
-                ₹{payAmount.toLocaleString("en-IN")}
-              </span>
+            <div className="bg-cream-light rounded-xl p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-ink-muted">Base Amount ({payCycles} cycle{payCycles > 1 ? 's' : ''})</span>
+                <span className="font-serif text-lg text-ink tabular">
+                  ₹{baseAmount.toLocaleString("en-IN")}
+                </span>
+              </div>
+              {totalPenalty > 0 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-ink-muted">Penalty</span>
+                  <span className="font-serif text-lg text-ink tabular">
+                    ₹{totalPenalty.toLocaleString("en-IN")}
+                  </span>
+                </div>
+              )}
+              <div className="border-t border-stone-200 pt-2 flex items-center justify-between">
+                <span className="text-sm font-medium text-ink">Total Amount</span>
+                <span className="font-serif text-2xl text-ink tabular">
+                  ₹{totalAmount.toLocaleString("en-IN")}
+                </span>
+              </div>
             </div>
           )}
 
@@ -447,8 +554,8 @@ function PayDialog({
             <Button type="button" variant="ghost" fullWidth onClick={onClose} disabled={loading}>
               Cancel
             </Button>
-            <Button type="submit" fullWidth loading={loading} disabled={!selectedFreq || payAmount <= 0}>
-              Pay ₹{payAmount.toLocaleString("en-IN")}
+            <Button type="submit" fullWidth loading={loading} disabled={!selectedFreq || baseAmount <= 0}>
+              Pay ₹{totalAmount.toLocaleString("en-IN")}
             </Button>
           </div>
         </form>

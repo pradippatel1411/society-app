@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "maintenance_master_society_fy_idx" ON "maintenance_master" USING btree ("society_id","fy_label");
